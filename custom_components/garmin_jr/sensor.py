@@ -1,13 +1,11 @@
 """Sensor platform for Garmin Jr."""
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
-    SensorEntityDescription,
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
@@ -16,12 +14,12 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from homeassistant.util import dt as dt_util
 
 from .const import (
     ATTR_ACTIVE_MINUTES,
     ATTR_BATTERY_LEVEL,
     ATTR_BATTERY_STATUS,
+    ATTR_CHILD_ID,
     ATTR_CHILD_NAME,
     ATTR_DAILY_STEP_GOAL,
     ATTR_DEVICE_ID,
@@ -31,6 +29,41 @@ from .const import (
     DOMAIN,
 )
 from .coordinator import GarminJrDataUpdateCoordinator
+
+SENSOR_TYPES: dict[str, dict[str, Any]] = {
+    "steps": {
+        "name": "Daily Steps",
+        "icon": "mdi:walk",
+        "device_class": None,
+        "state_class": SensorStateClass.TOTAL_INCREASING,
+        "unit": "steps",
+        "data_key": ATTR_STEPS,
+    },
+    "battery": {
+        "name": "Battery",
+        "icon": "mdi:battery",
+        "device_class": SensorDeviceClass.BATTERY,
+        "state_class": SensorStateClass.MEASUREMENT,
+        "unit": PERCENTAGE,
+        "data_key": ATTR_BATTERY_LEVEL,
+    },
+    "active_minutes": {
+        "name": "Active Minutes",
+        "icon": "mdi:timer-outline",
+        "device_class": SensorDeviceClass.DURATION,
+        "state_class": SensorStateClass.TOTAL_INCREASING,
+        "unit": UnitOfTime.MINUTES,
+        "data_key": ATTR_ACTIVE_MINUTES,
+    },
+    "last_sync": {
+        "name": "Last Sync",
+        "icon": "mdi:sync",
+        "device_class": SensorDeviceClass.TIMESTAMP,
+        "state_class": None,
+        "unit": None,
+        "data_key": ATTR_LAST_SYNC,
+    },
+}
 
 
 async def async_setup_entry(
@@ -48,31 +81,15 @@ async def async_setup_entry(
         if not coordinator.data:
             return
 
-        new_entities: list[SensorEntity] = []
-        for child_id, child_data in coordinator.data.items():
-            # Steps sensor
-            key_steps = f"{child_id}_steps"
-            if key_steps not in tracked_sensors:
-                tracked_sensors.add(key_steps)
-                new_entities.append(GarminJrStepsSensor(coordinator, child_id))
-
-            # Battery sensor
-            key_battery = f"{child_id}_battery"
-            if key_battery not in tracked_sensors:
-                tracked_sensors.add(key_battery)
-                new_entities.append(GarminJrBatterySensor(coordinator, child_id))
-
-            # Active minutes sensor
-            key_active = f"{child_id}_active_minutes"
-            if key_active not in tracked_sensors:
-                tracked_sensors.add(key_active)
-                new_entities.append(GarminJrActiveMinutesSensor(coordinator, child_id))
-
-            # Last sync sensor
-            key_sync = f"{child_id}_last_sync"
-            if key_sync not in tracked_sensors:
-                tracked_sensors.add(key_sync)
-                new_entities.append(GarminJrLastSyncSensor(coordinator, child_id))
+        new_entities: list[GarminJrSensorEntity] = []
+        for child_id, _ in coordinator.data.items():
+            for s_type in SENSOR_TYPES:
+                key = f"{child_id}_{s_type}"
+                if key not in tracked_sensors:
+                    tracked_sensors.add(key)
+                    new_entities.append(
+                        GarminJrSensorEntity(coordinator, child_id, s_type)
+                    )
 
         if new_entities:
             async_add_entities(new_entities)
@@ -81,8 +98,10 @@ async def async_setup_entry(
     entry.async_on_unload(coordinator.async_add_listener(_check_entities))
 
 
-class GarminJrBaseSensor(CoordinatorEntity[GarminJrDataUpdateCoordinator], SensorEntity):
-    """Base sensor for Garmin Jr child data."""
+class GarminJrSensorEntity(
+    CoordinatorEntity[GarminJrDataUpdateCoordinator], SensorEntity
+):
+    """Representation of a Garmin Jr sensor entity."""
 
     _attr_has_entity_name = True
 
@@ -92,20 +111,58 @@ class GarminJrBaseSensor(CoordinatorEntity[GarminJrDataUpdateCoordinator], Senso
         child_id: str,
         sensor_type: str,
     ) -> None:
-        """Initialize base sensor."""
+        """Initialize the sensor."""
         super().__init__(coordinator)
         self.child_id = child_id
         self.sensor_type = sensor_type
+        self.spec = SENSOR_TYPES[sensor_type]
         self._attr_unique_id = f"garmin_jr_{child_id}_{sensor_type}"
+        self._attr_device_class = self.spec["device_class"]
+        self._attr_state_class = self.spec["state_class"]
+        self._attr_native_unit_of_measurement = self.spec["unit"]
+        self._attr_icon = self.spec["icon"]
 
     @property
     def _child_data(self) -> dict[str, Any]:
-        """Return current child data dictionary."""
+        """Return the current child data from the coordinator."""
         return self.coordinator.data.get(self.child_id, {}) if self.coordinator.data else {}
 
     @property
+    def name(self) -> str:
+        """Return entity display name."""
+        return self.spec["name"]
+
+    @property
+    def native_value(self) -> Any:
+        """Return state of the sensor."""
+        data = self._child_data
+        val = data.get(self.spec["data_key"])
+        return val
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return entity specific state attributes."""
+        data = self._child_data
+        attrs: dict[str, Any] = {
+            "child_id": self.child_id,
+            "device_id": data.get(ATTR_DEVICE_ID),
+            "last_sync": data.get(ATTR_LAST_SYNC),
+        }
+        if self.sensor_type == "steps":
+            attrs["daily_step_goal"] = data.get(ATTR_DAILY_STEP_GOAL)
+        elif self.sensor_type == "battery":
+            attrs["battery_status"] = data.get(ATTR_BATTERY_STATUS)
+        elif self.sensor_type == "last_sync":
+            tokens = self.coordinator.client.get_token_data()
+            if tokens:
+                attrs["di_token"] = tokens.get("di_token")
+                attrs["di_refresh_token"] = tokens.get("di_refresh_token")
+                attrs["di_client_id"] = tokens.get("di_client_id")
+        return attrs
+
+    @property
     def device_info(self) -> DeviceInfo:
-        """Return device information."""
+        """Return device information for Home Assistant registry."""
         data = self._child_data
         child_name = data.get(ATTR_CHILD_NAME, "Garmin Jr Child")
         return DeviceInfo(
@@ -115,98 +172,3 @@ class GarminJrBaseSensor(CoordinatorEntity[GarminJrDataUpdateCoordinator], Senso
             model=data.get(ATTR_MODEL, "Garmin Bounce / Jr"),
             serial_number=str(data.get(ATTR_DEVICE_ID, "")),
         )
-
-
-class GarminJrStepsSensor(GarminJrBaseSensor):
-    """Sensor for daily step count."""
-
-    _attr_state_class = SensorStateClass.TOTAL_INCREASING
-    _attr_native_unit_of_measurement = "steps"
-    _attr_icon = "mdi:walk"
-
-    def __init__(self, coordinator: GarminJrDataUpdateCoordinator, child_id: str) -> None:
-        super().__init__(coordinator, child_id, "steps")
-
-    @property
-    def name(self) -> str:
-        return "Daily Steps"
-
-    @property
-    def native_value(self) -> int:
-        return int(self._child_data.get(ATTR_STEPS, 0))
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        return {
-            "daily_goal": self._child_data.get(ATTR_DAILY_STEP_GOAL, 6000),
-        }
-
-
-class GarminJrBatterySensor(GarminJrBaseSensor):
-    """Sensor for device battery level."""
-
-    _attr_device_class = SensorDeviceClass.BATTERY
-    _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_native_unit_of_measurement = PERCENTAGE
-
-    def __init__(self, coordinator: GarminJrDataUpdateCoordinator, child_id: str) -> None:
-        super().__init__(coordinator, child_id, "battery")
-
-    @property
-    def name(self) -> str:
-        return "Battery"
-
-    @property
-    def native_value(self) -> int | None:
-        val = self._child_data.get(ATTR_BATTERY_LEVEL)
-        return int(val) if val is not None else None
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        return {
-            "status": self._child_data.get(ATTR_BATTERY_STATUS, "NORMAL"),
-        }
-
-
-class GarminJrActiveMinutesSensor(GarminJrBaseSensor):
-    """Sensor for daily active minutes."""
-
-    _attr_device_class = SensorDeviceClass.DURATION
-    _attr_state_class = SensorStateClass.TOTAL_INCREASING
-    _attr_native_unit_of_measurement = UnitOfTime.MINUTES
-    _attr_icon = "mdi:clock-fast"
-
-    def __init__(self, coordinator: GarminJrDataUpdateCoordinator, child_id: str) -> None:
-        super().__init__(coordinator, child_id, "active_minutes")
-
-    @property
-    def name(self) -> str:
-        return "Active Minutes"
-
-    @property
-    def native_value(self) -> int:
-        return int(self._child_data.get(ATTR_ACTIVE_MINUTES, 0))
-
-
-class GarminJrLastSyncSensor(GarminJrBaseSensor):
-    """Sensor for last synchronization timestamp."""
-
-    _attr_device_class = SensorDeviceClass.TIMESTAMP
-    _attr_icon = "mdi:sync"
-
-    def __init__(self, coordinator: GarminJrDataUpdateCoordinator, child_id: str) -> None:
-        super().__init__(coordinator, child_id, "last_sync")
-
-    @property
-    def name(self) -> str:
-        return "Last Sync"
-
-    @property
-    def native_value(self) -> datetime | None:
-        ts_str = self._child_data.get(ATTR_LAST_SYNC)
-        if not ts_str:
-            return None
-        try:
-            return dt_util.parse_datetime(ts_str)
-        except Exception:
-            return None
