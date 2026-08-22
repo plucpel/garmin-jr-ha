@@ -40,6 +40,7 @@ class GarminJrClient:
         self.client = Client()
         self._user_guid: str | None = None
         self._display_name: str | None = None
+        self._user_id: str | None = None
 
         if token_data:
             self._load_token_data(token_data)
@@ -107,17 +108,49 @@ class GarminJrClient:
             _LOGGER.debug("Session validation failed: %s", err)
             return False
 
+    def _query_url(self, url: str) -> Any:
+        """Execute a direct authenticated GET request to any Garmin URL."""
+        try:
+            headers = self.client.get_api_headers()
+            resp = self.client._api_session.get(url, headers=headers, timeout=10)
+            if resp.status_code == 200:
+                try:
+                    return resp.json()
+                except Exception:
+                    return resp.text
+        except Exception:
+            pass
+        return None
+
     def _probe_endpoints(self) -> dict[str, Any]:
         """Probe candidate Garmin Family, Child, and LiveTrack endpoints."""
         discovered: dict[str, Any] = {}
-        candidate_endpoints = [
+
+        # 1. Fetch user identifiers
+        try:
+            profile = self.client.connectapi("/userprofile-service/socialProfile")
+            if isinstance(profile, dict):
+                self._display_name = profile.get("displayName")
+                self._user_guid = profile.get("garminGUID")
+                self._user_id = str(profile.get("profileId") or profile.get("id") or "")
+        except Exception:
+            pass
+
+        d_name = self._display_name or ""
+        u_guid = self._user_guid or ""
+        u_id = self._user_id or ""
+
+        candidate_paths = [
             "/family-service/family",
+            f"/family-service/family/{u_id}" if u_id else "",
+            f"/family-service/family/user/{d_name}" if d_name else "",
+            f"/family-service/family/user/{u_guid}" if u_guid else "",
             "/family-service/family/members",
             "/family-service/family/children",
             "/family-service/family/user",
             "/family-service/family/summary",
-            "/family-service/user/family",
             "/child-operations/family",
+            f"/child-operations/family/{d_name}" if d_name else "",
             "/child-operations/children",
             "/child-service/family",
             "/child-summary-service/family",
@@ -126,24 +159,49 @@ class GarminJrClient:
             "/kids-service/children",
             "/junior-service/family",
             "/vivofit-jr/family",
-            "/userprofile-service/userprofile/personal-information",
-            "/userprofile-service/socialProfile",
+            "/userprofile-service/socialProfile/connections",
             "/userprofile-service/userprofile/connections",
             "/userprofile-service/userprofile/family",
             "/userprofile-service/userprofile/relationships",
+            f"/device-service/device-info/user/{d_name}" if d_name else "",
+            f"/device-service/device-info/user/{u_id}" if u_id else "",
             "/device-service/devicesummary/all",
             "/livetrack-service/livetrack/session",
             "/livetrack-service/livetrack/contacts",
+            "/livetrack-service/livetrack/tokens",
         ]
 
-        for ep in candidate_endpoints:
+        # Check paths on connectapi
+        for path in candidate_paths:
+            if not path:
+                continue
             try:
-                res = self.client.connectapi(ep)
+                res = self.client.connectapi(path)
                 if res:
-                    discovered[ep] = res
-                    _LOGGER.warning("Garmin Jr Discovery: Endpoint [%s] returned valid data: %s", ep, str(res)[:300])
+                    discovered[f"connectapi:{path}"] = res
+                    _LOGGER.warning("Garmin Jr Discovery: connectapi [%s] -> %s", path, str(res)[:300])
             except Exception as e:
-                _LOGGER.debug("Discovery endpoint [%s] skipped: %s", ep, e)
+                _LOGGER.debug("connectapi path [%s] skipped: %s", path, e)
+
+        # Check additional Garmin domains
+        for base in (
+            "https://connect.garmin.com/modern/proxy",
+            "https://services.garmin.com",
+            "https://livetrack.garmin.com",
+        ):
+            for path in (
+                "/family-service/family",
+                "/child-operations/family",
+                "/child-service/family",
+                "/kids-service/family",
+                "/device-service/deviceregistration/devices",
+                "/livetrack-service/livetrack/session",
+            ):
+                full_url = f"{base}{path}"
+                res = self._query_url(full_url)
+                if res:
+                    discovered[full_url] = res
+                    _LOGGER.warning("Garmin Jr Discovery: [%s] -> %s", full_url, str(res)[:300])
 
         return discovered
 
@@ -196,7 +254,6 @@ class GarminJrClient:
                         dev_id = str(device_info.get("deviceId") or child.get("deviceId") or child_id)
                         model = device_info.get("productDisplayName") or device_info.get("partNumber") or child.get("deviceModel") or "Garmin Bounce"
 
-                        # Location checks
                         lat = None
                         lon = None
                         accuracy = 15
@@ -241,7 +298,7 @@ class GarminJrClient:
                             "last_sync": child.get("lastSyncTime") or time.strftime("%Y-%m-%dT%H:%M:%SZ"),
                         }
 
-        # 4. Also include standard devices
+        # 4. Standard Devices Fallback
         for dev in devices:
             dev_id = str(dev.get("deviceId") or dev.get("deviceNumber") or dev.get("id") or "unknown")
             dev_name = dev.get("displayName") or dev.get("productDisplayName") or "Garmin Watch"
@@ -263,7 +320,7 @@ class GarminJrClient:
             steps = 0
             active_mins = 0
 
-            # Check location for device
+            # Check location
             try:
                 loc_data = self.client.connectapi(f"/device-service/device/{dev_id}/location")
                 if isinstance(loc_data, dict) and ("latitude" in loc_data or "lat" in loc_data):
