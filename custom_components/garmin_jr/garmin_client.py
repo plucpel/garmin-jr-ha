@@ -108,9 +108,8 @@ class GarminJrClient:
             _LOGGER.debug("Session validation failed: %s", err)
             return False
 
-    def _query_endpoint(self, path: str) -> tuple[int, Any]:
-        """Query an endpoint and return HTTP status code and payload."""
-        url = f"https://connectapi.garmin.com/{path.lstrip('/')}"
+    def _query_url(self, url: str) -> tuple[int, Any]:
+        """Query a direct URL using current auth headers."""
         try:
             headers = self.client.get_api_headers()
             resp = self.client._api_session.get(url, headers=headers, timeout=5)
@@ -124,7 +123,7 @@ class GarminJrClient:
             return 0, str(e)
 
     def _probe_endpoints(self) -> dict[str, Any]:
-        """Deep probe candidate Garmin Family, Child, and LiveTrack endpoints."""
+        """Deep probe candidate Garmin Family, Child, and LiveTrack endpoints across domains."""
         discovered: dict[str, Any] = {}
 
         try:
@@ -140,77 +139,59 @@ class GarminJrClient:
         u_guid = self._user_guid or ""
         u_id = self._user_id or ""
 
-        probe_list = [
+        probe_paths = [
             "/family-service/family",
-            "/family-service/v1/family",
-            "/family-service/v2/family",
             f"/family-service/family/{u_id}" if u_id else "",
             f"/family-service/family/user/{d_name}" if d_name else "",
             f"/family-service/family/user/{u_guid}" if u_guid else "",
             "/family-service/family/members",
             "/family-service/family/children",
-            "/family-service/family/user",
             "/family-service/family/summary",
             "/family-service/user/family",
             "/child-operations/family",
-            "/child-operations/v1/family",
-            "/child-operations/v2/family",
             f"/child-operations/family/{d_name}" if d_name else "",
             "/child-operations/children",
             "/child-service/family",
             "/child-service/children",
             "/child-summary-service/family",
-            "/child-summary/family",
             "/kids-service/family",
             "/kids-service/children",
-            "/kids/family",
             "/junior-service/family",
-            "/junior/family",
             "/vivofit-jr/family",
-            "/vivofitjr/family",
             "/parental-service/family",
-            "/parental-service/children",
-            "/parental/family",
             "/safety-service/family",
-            "/assistance-service/family",
             "/geofence-service/geofences",
-            "/geofence-service/v1/geofences",
             "/lte-service/devices",
-            "/lte-service/v1/devices",
-            "/communication-service/family",
-            "/messaging-service/family",
-            "/userprofile-service/socialProfile/connections",
-            "/userprofile-service/userprofile/connections",
-            "/userprofile-service/userprofile/family",
-            "/userprofile-service/socialProfile/family",
-            "/socialnetwork-service/family",
-            "/socialnetwork-service/connections",
-            "/userprofile-service/userprofile/relationships",
-            f"/device-service/device-info/user/{d_name}" if d_name else "",
-            f"/device-service/device-info/user/{u_id}" if u_id else "",
-            "/device-service/devicesummary/all",
-            "/device-service/devicesummary/user",
             "/livetrack-service/livetrack/session",
             "/livetrack-service/livetrack/contacts",
             "/livetrack-service/livetrack/tokens",
             "/livetrack-service/livetrack/settings",
-            "/badge-service/badge/family",
-            "/wellness-service/wellness/dailySummaryChart",
+            "/userprofile-service/socialProfile/connections",
+        ]
+
+        domains = [
+            "https://connectapi.garmin.com",
+            "https://services.garmin.com",
+            "https://mobile.garmin.com",
+            "https://livetrack.garmin.com",
         ]
 
         found_log: list[str] = []
-        for path in probe_list:
-            if not path:
-                continue
-            status, res = self._query_endpoint(path)
-            if status == 200:
-                discovered[path] = res
-                found_log.append(f"200:{path}")
-                _LOGGER.warning("GARMIN_JR_PROBE 200 OK: [%s] -> %s", path, str(res)[:300])
-            elif status in (400, 401, 403):
-                found_log.append(f"{status}:{path}")
 
-        _LOGGER.warning("GARMIN_JR_CANDIDATES: %s", ", ".join(found_log))
+        for domain in domains:
+            for path in probe_paths:
+                if not path:
+                    continue
+                url = f"{domain}/{path.lstrip('/')}"
+                status, res = self._query_url(url)
+                if status == 200:
+                    discovered[url] = res
+                    found_log.append(f"200:{url}")
+                    _LOGGER.warning("GARMIN_PROBE_200: [%s] -> %s", url, str(res)[:300])
+                elif status in (400, 401, 403):
+                    found_log.append(f"{status}:{url}")
+
+        _LOGGER.warning("GARMIN_MULTI_DOMAIN_SUMMARY: %s", ", ".join(found_log[:15]))
         return discovered
 
     def fetch_all_data(self) -> dict[str, dict[str, Any]]:
@@ -244,7 +225,7 @@ class GarminJrClient:
             _LOGGER.warning("Could not fetch device list: %s", err)
 
         # 3. Parse Children from Discovered Family Endpoints
-        for ep, data in discovered.items():
+        for url, data in discovered.items():
             if isinstance(data, dict):
                 children_list = (
                     data.get("children")
@@ -257,10 +238,10 @@ class GarminJrClient:
                         if not isinstance(child, dict):
                             continue
                         child_id = str(child.get("childId") or child.get("id") or child.get("userId") or f"child_{len(results)}")
-                        child_name = child.get("displayName") or child.get("name") or child.get("firstName") or "Child"
+                        child_name = child.get("displayName") or child.get("name") or child.get("firstName") or "Benjamin"
                         device_info = child.get("device") or (child.get("devices", [{}])[0] if isinstance(child.get("devices"), list) and child.get("devices") else {})
                         dev_id = str(device_info.get("deviceId") or child.get("deviceId") or child_id)
-                        model = device_info.get("productDisplayName") or device_info.get("partNumber") or child.get("deviceModel") or "Garmin Bounce"
+                        model = device_info.get("productDisplayName") or device_info.get("partNumber") or child.get("deviceModel") or "Garmin Bounce 2"
 
                         lat = None
                         lon = None
