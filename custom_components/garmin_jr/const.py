@@ -16,6 +16,10 @@ CONF_PASSWORD = "password"
 CONF_TOKEN_PATH = "token_path"
 CONF_TOKEN_DATA = "token_data"
 CONF_MFA_CODE = "mfa_code"
+CONF_TOKENS = "tokens"
+CONF_DI_TOKEN = "di_token"
+CONF_DI_REFRESH_TOKEN = "di_refresh_token"
+CONF_DI_CLIENT_ID = "di_client_id"
 
 CONF_SCAN_INTERVAL = "scan_interval"
 DEFAULT_SCAN_INTERVAL = 300  # 5 minutes
