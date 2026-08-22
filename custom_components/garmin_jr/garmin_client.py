@@ -108,25 +108,25 @@ class GarminJrClient:
             _LOGGER.debug("Session validation failed: %s", err)
             return False
 
-    def _query_url(self, url: str) -> Any:
-        """Execute a direct authenticated GET request to any Garmin URL."""
+    def _query_endpoint(self, path: str) -> tuple[int, Any]:
+        """Query an endpoint and return HTTP status code and payload."""
+        url = f"https://connectapi.garmin.com/{path.lstrip('/')}"
         try:
             headers = self.client.get_api_headers()
-            resp = self.client._api_session.get(url, headers=headers, timeout=10)
+            resp = self.client._api_session.get(url, headers=headers, timeout=5)
             if resp.status_code == 200:
                 try:
-                    return resp.json()
+                    return 200, resp.json()
                 except Exception:
-                    return resp.text
-        except Exception:
-            pass
-        return None
+                    return 200, resp.text
+            return resp.status_code, None
+        except Exception as e:
+            return 0, str(e)
 
     def _probe_endpoints(self) -> dict[str, Any]:
-        """Probe candidate Garmin Family, Child, and LiveTrack endpoints."""
+        """Deep probe candidate Garmin Family, Child, and LiveTrack endpoints."""
         discovered: dict[str, Any] = {}
 
-        # 1. Fetch user identifiers
         try:
             profile = self.client.connectapi("/userprofile-service/socialProfile")
             if isinstance(profile, dict):
@@ -140,7 +140,7 @@ class GarminJrClient:
         u_guid = self._user_guid or ""
         u_id = self._user_id or ""
 
-        candidate_paths = [
+        probe_list = [
             "/family-service/family",
             f"/family-service/family/{u_id}" if u_id else "",
             f"/family-service/family/user/{d_name}" if d_name else "",
@@ -149,16 +149,23 @@ class GarminJrClient:
             "/family-service/family/children",
             "/family-service/family/user",
             "/family-service/family/summary",
+            "/family-service/user/family",
             "/child-operations/family",
             f"/child-operations/family/{d_name}" if d_name else "",
             "/child-operations/children",
             "/child-service/family",
+            "/child-service/children",
             "/child-summary-service/family",
             "/child-summary/family",
             "/kids-service/family",
             "/kids-service/children",
             "/junior-service/family",
             "/vivofit-jr/family",
+            "/parental-service/family",
+            "/parental-service/children",
+            "/safety-service/family",
+            "/geofence-service/geofences",
+            "/lte-service/devices",
             "/userprofile-service/socialProfile/connections",
             "/userprofile-service/userprofile/connections",
             "/userprofile-service/userprofile/family",
@@ -169,40 +176,29 @@ class GarminJrClient:
             "/livetrack-service/livetrack/session",
             "/livetrack-service/livetrack/contacts",
             "/livetrack-service/livetrack/tokens",
+            "/livetrack-service/livetrack/settings",
+            "/badge-service/badge/family",
+            "/wellness-service/wellness/dailySummaryChart",
         ]
 
-        # Check paths on connectapi
-        for path in candidate_paths:
+        results_summary: list[str] = []
+        for path in probe_list:
             if not path:
                 continue
-            try:
-                res = self.client.connectapi(path)
-                if res:
-                    discovered[f"connectapi:{path}"] = res
-                    _LOGGER.warning("Garmin Jr Discovery: connectapi [%s] -> %s", path, str(res)[:300])
-            except Exception as e:
-                _LOGGER.debug("connectapi path [%s] skipped: %s", path, e)
+            status, res = self._query_endpoint(path)
+            if status == 200:
+                discovered[path] = res
+                results_summary.append(f"{path}: 200 (OK)")
+                _LOGGER.warning("GARMIN_JR_PROBE 200 OK: [%s] -> %s", path, str(res)[:300])
+            elif status in (401, 403):
+                results_summary.append(f"{path}: {status} (FORBIDDEN)")
+            elif status == 404:
+                # Normal 404
+                pass
+            else:
+                results_summary.append(f"{path}: {status}")
 
-        # Check additional Garmin domains
-        for base in (
-            "https://connect.garmin.com/modern/proxy",
-            "https://services.garmin.com",
-            "https://livetrack.garmin.com",
-        ):
-            for path in (
-                "/family-service/family",
-                "/child-operations/family",
-                "/child-service/family",
-                "/kids-service/family",
-                "/device-service/deviceregistration/devices",
-                "/livetrack-service/livetrack/session",
-            ):
-                full_url = f"{base}{path}"
-                res = self._query_url(full_url)
-                if res:
-                    discovered[full_url] = res
-                    _LOGGER.warning("Garmin Jr Discovery: [%s] -> %s", full_url, str(res)[:300])
-
+        _LOGGER.warning("GARMIN_JR_PROBE_SUMMARY: %s", ", ".join(results_summary))
         return discovered
 
     def fetch_all_data(self) -> dict[str, dict[str, Any]]:
