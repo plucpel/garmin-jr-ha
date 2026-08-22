@@ -142,6 +142,8 @@ class GarminJrClient:
 
         probe_list = [
             "/family-service/family",
+            "/family-service/v1/family",
+            "/family-service/v2/family",
             f"/family-service/family/{u_id}" if u_id else "",
             f"/family-service/family/user/{d_name}" if d_name else "",
             f"/family-service/family/user/{u_guid}" if u_guid else "",
@@ -151,6 +153,8 @@ class GarminJrClient:
             "/family-service/family/summary",
             "/family-service/user/family",
             "/child-operations/family",
+            "/child-operations/v1/family",
+            "/child-operations/v2/family",
             f"/child-operations/family/{d_name}" if d_name else "",
             "/child-operations/children",
             "/child-service/family",
@@ -159,20 +163,33 @@ class GarminJrClient:
             "/child-summary/family",
             "/kids-service/family",
             "/kids-service/children",
+            "/kids/family",
             "/junior-service/family",
+            "/junior/family",
             "/vivofit-jr/family",
+            "/vivofitjr/family",
             "/parental-service/family",
             "/parental-service/children",
+            "/parental/family",
             "/safety-service/family",
+            "/assistance-service/family",
             "/geofence-service/geofences",
+            "/geofence-service/v1/geofences",
             "/lte-service/devices",
+            "/lte-service/v1/devices",
+            "/communication-service/family",
+            "/messaging-service/family",
             "/userprofile-service/socialProfile/connections",
             "/userprofile-service/userprofile/connections",
             "/userprofile-service/userprofile/family",
+            "/userprofile-service/socialProfile/family",
+            "/socialnetwork-service/family",
+            "/socialnetwork-service/connections",
             "/userprofile-service/userprofile/relationships",
             f"/device-service/device-info/user/{d_name}" if d_name else "",
             f"/device-service/device-info/user/{u_id}" if u_id else "",
             "/device-service/devicesummary/all",
+            "/device-service/devicesummary/user",
             "/livetrack-service/livetrack/session",
             "/livetrack-service/livetrack/contacts",
             "/livetrack-service/livetrack/tokens",
@@ -181,24 +198,19 @@ class GarminJrClient:
             "/wellness-service/wellness/dailySummaryChart",
         ]
 
-        results_summary: list[str] = []
+        found_log: list[str] = []
         for path in probe_list:
             if not path:
                 continue
             status, res = self._query_endpoint(path)
             if status == 200:
                 discovered[path] = res
-                results_summary.append(f"{path}: 200 (OK)")
+                found_log.append(f"200:{path}")
                 _LOGGER.warning("GARMIN_JR_PROBE 200 OK: [%s] -> %s", path, str(res)[:300])
-            elif status in (401, 403):
-                results_summary.append(f"{path}: {status} (FORBIDDEN)")
-            elif status == 404:
-                # Normal 404
-                pass
-            else:
-                results_summary.append(f"{path}: {status}")
+            elif status in (400, 401, 403):
+                found_log.append(f"{status}:{path}")
 
-        _LOGGER.warning("GARMIN_JR_PROBE_SUMMARY: %s", ", ".join(results_summary))
+        _LOGGER.warning("GARMIN_JR_CANDIDATES: %s", ", ".join(found_log))
         return discovered
 
     def fetch_all_data(self) -> dict[str, dict[str, Any]]:
