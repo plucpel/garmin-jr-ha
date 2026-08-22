@@ -1,0 +1,59 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Garmin Jr Authentication",
+        "description": "Choose how to authenticate with Garmin:",
+        "menu_options": {
+          "credentials": "Login with Email and Password",
+          "token": "Import Saved Session Token"
+        }
+      },
+      "credentials": {
+        "title": "Garmin Account Login",
+        "description": "Enter your Garmin Connect account credentials:",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
+      },
+      "mfa": {
+        "title": "Two-Factor Verification",
+        "description": "Enter the MFA code sent to your email or authenticator app:",
+        "data": {
+          "mfa_code": "MFA Code"
+        }
+      },
+      "token": {
+        "title": "Import Garmin Session Token",
+        "description": "Provide a path to garmin_tokens.json or paste the token JSON:",
+        "data": {
+          "token_path": "Token File Path",
+          "token_data": "Raw Token JSON (Optional)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to Garmin servers",
+      "invalid_auth": "Invalid email or password",
+      "invalid_mfa": "Invalid MFA verification code",
+      "invalid_token_file": "Failed to read token file",
+      "invalid_token_json": "Invalid JSON format in token data",
+      "token_expired": "Session token is expired and could not be refreshed",
+      "unknown": "Unexpected error occurred"
+    },
+    "abort": {
+      "already_configured": "This Garmin account or token is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Garmin Jr Options",
+        "data": {
+          "scan_interval": "Update interval in seconds (default: 300)"
+        }
+      }
+    }
+  }
+}
