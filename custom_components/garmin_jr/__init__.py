@@ -8,8 +8,9 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .const import (
-    AUTH_TYPE_TOKEN,
-    CONF_AUTH_TYPE,
+    CONF_DI_CLIENT_ID,
+    CONF_DI_REFRESH_TOKEN,
+    CONF_DI_TOKEN,
     CONF_EMAIL,
     CONF_PASSWORD,
     CONF_TOKEN_DATA,
@@ -34,6 +35,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
 
     token_data = entry.data.get(CONF_TOKEN_DATA)
+    if not token_data and entry.data.get(CONF_DI_TOKEN):
+        token_data = {
+            "di_token": entry.data.get(CONF_DI_TOKEN),
+            "di_refresh_token": entry.data.get(CONF_DI_REFRESH_TOKEN),
+            "di_client_id": entry.data.get(CONF_DI_CLIENT_ID),
+        }
+
     email = entry.data.get(CONF_EMAIL)
     password = entry.data.get(CONF_PASSWORD)
 

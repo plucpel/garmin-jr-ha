@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from datetime import timedelta
+import json
 import logging
+import os
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -54,19 +56,28 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
 
             # Persist updated token data if changed
             current_tokens = self.client.get_token_data()
-            if current_tokens and current_tokens != self.entry.data.get(CONF_TOKEN_DATA):
-                new_data = {**self.entry.data, CONF_TOKEN_DATA: current_tokens}
-                self.hass.config_entries.async_update_entry(self.entry, data=new_data)
-                LOGGER.debug("Persisted updated Garmin session tokens to config entry")
+            if current_tokens:
+                # Save token to www/garmin_tokens.json for MCP retrieval
+                try:
+                    www_dir = self.hass.config.path("www")
+                    os.makedirs(www_dir, exist_ok=True)
+                    token_path = os.path.join(www_dir, "garmin_tokens.json")
+                    with open(token_path, "w") as f:
+                        json.dump(current_tokens, f)
+                except Exception as err:
+                    LOGGER.debug("Could not write www token file: %s", err)
+
+                if current_tokens != self.entry.data.get(CONF_TOKEN_DATA):
+                    new_data = {**self.entry.data, CONF_TOKEN_DATA: current_tokens}
+                    self.hass.config_entries.async_update_entry(self.entry, data=new_data)
+                    LOGGER.debug("Persisted updated Garmin session tokens to config entry")
 
             return data
 
         except GarminJrAuthError as err:
-            LOGGER.error("Garmin Jr authentication error during update: %s", err)
-            raise ConfigEntryAuthFailed(err) from err
+            raise ConfigEntryAuthFailed(f"Garmin authentication failed: {err}") from err
         except GarminJrConnectionError as err:
-            LOGGER.warning("Garmin Jr connection warning: %s", err)
-            raise UpdateFailed(f"Connection error: {err}") from err
+            raise UpdateFailed(f"Error communicating with Garmin: {err}") from err
         except Exception as err:
             LOGGER.exception("Unexpected error fetching Garmin Jr data: %s", err)
             raise UpdateFailed(f"Unexpected error: {err}") from err
