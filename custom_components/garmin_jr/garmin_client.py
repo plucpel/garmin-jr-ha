@@ -101,12 +101,51 @@ class GarminJrClient:
             if self.client._token_expires_soon():
                 self.client._refresh_session()
 
-            # Attempt a lightweight request to verify token
             devices = self.client.connectapi("/device-service/deviceregistration/devices")
             return isinstance(devices, list)
         except Exception as err:
             _LOGGER.debug("Session validation failed: %s", err)
             return False
+
+    def _probe_endpoints(self) -> dict[str, Any]:
+        """Probe candidate Garmin Family, Child, and LiveTrack endpoints."""
+        discovered: dict[str, Any] = {}
+        candidate_endpoints = [
+            "/family-service/family",
+            "/family-service/family/members",
+            "/family-service/family/children",
+            "/family-service/family/user",
+            "/family-service/family/summary",
+            "/family-service/user/family",
+            "/child-operations/family",
+            "/child-operations/children",
+            "/child-service/family",
+            "/child-summary-service/family",
+            "/child-summary/family",
+            "/kids-service/family",
+            "/kids-service/children",
+            "/junior-service/family",
+            "/vivofit-jr/family",
+            "/userprofile-service/userprofile/personal-information",
+            "/userprofile-service/socialProfile",
+            "/userprofile-service/userprofile/connections",
+            "/userprofile-service/userprofile/family",
+            "/userprofile-service/userprofile/relationships",
+            "/device-service/devicesummary/all",
+            "/livetrack-service/livetrack/session",
+            "/livetrack-service/livetrack/contacts",
+        ]
+
+        for ep in candidate_endpoints:
+            try:
+                res = self.client.connectapi(ep)
+                if res:
+                    discovered[ep] = res
+                    _LOGGER.warning("Garmin Jr Discovery: Endpoint [%s] returned valid data: %s", ep, str(res)[:300])
+            except Exception as e:
+                _LOGGER.debug("Discovery endpoint [%s] skipped: %s", ep, e)
+
+        return discovered
 
     def fetch_all_data(self) -> dict[str, dict[str, Any]]:
         """Fetch all child devices, steps, battery, and location data."""
@@ -126,7 +165,10 @@ class GarminJrClient:
 
         results: dict[str, dict[str, Any]] = {}
 
-        # 1. Discover Registered Devices
+        # 1. Probe family and child endpoints
+        discovered = self._probe_endpoints()
+
+        # 2. Discover Registered Devices
         devices: list[dict[str, Any]] = []
         try:
             raw_devices = self.client.connectapi("/device-service/deviceregistration/devices")
@@ -135,71 +177,110 @@ class GarminJrClient:
         except Exception as err:
             _LOGGER.warning("Could not fetch device list: %s", err)
 
-        # 2. Try fetching family / children profiles
-        family_members: list[dict[str, Any]] = []
-        for endpoint in (
-            "/family-service/family",
-            "/child-service/family",
-            "/child-summary/family",
-            "/userprofile-service/userprofile/personal-information",
-        ):
-            try:
-                data = self.client.connectapi(endpoint)
-                if isinstance(data, dict):
-                    members = data.get("members") or data.get("children") or data.get("familyMembers")
-                    if isinstance(members, list):
-                        family_members = members
-                        break
-            except Exception:
-                continue
+        # 3. Parse Children from Discovered Family Endpoints
+        for ep, data in discovered.items():
+            if isinstance(data, dict):
+                children_list = (
+                    data.get("children")
+                    or data.get("familyMembers")
+                    or data.get("members")
+                    or data.get("kids")
+                )
+                if isinstance(children_list, list):
+                    for child in children_list:
+                        if not isinstance(child, dict):
+                            continue
+                        child_id = str(child.get("childId") or child.get("id") or child.get("userId") or f"child_{len(results)}")
+                        child_name = child.get("displayName") or child.get("name") or child.get("firstName") or "Child"
+                        device_info = child.get("device") or (child.get("devices", [{}])[0] if isinstance(child.get("devices"), list) and child.get("devices") else {})
+                        dev_id = str(device_info.get("deviceId") or child.get("deviceId") or child_id)
+                        model = device_info.get("productDisplayName") or device_info.get("partNumber") or child.get("deviceModel") or "Garmin Bounce"
 
-        # 3. Match devices and compile child entries
-        if not devices and not family_members:
-            # Fallback mock/sample device structure if none returned to prevent crashes
-            _LOGGER.debug("No devices or family members found on account")
-            return {}
+                        # Location checks
+                        lat = None
+                        lon = None
+                        accuracy = 15
+                        loc_ts = time.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        # Parse devices into child records
+                        for loc_ep in (
+                            f"/location-service/device/{dev_id}",
+                            f"/device-service/device/{dev_id}/location",
+                            f"/family-service/family/child/{child_id}/location",
+                            f"/child-operations/child/{child_id}/location",
+                        ):
+                            try:
+                                loc_data = self.client.connectapi(loc_ep)
+                                if isinstance(loc_data, dict) and ("latitude" in loc_data or "lat" in loc_data):
+                                    lat = loc_data.get("latitude") or loc_data.get("lat")
+                                    lon = loc_data.get("longitude") or loc_data.get("lon") or loc_data.get("lng")
+                                    accuracy = loc_data.get("accuracy") or loc_data.get("horizontalAccuracy") or 15
+                                    loc_ts = loc_data.get("timestamp") or loc_data.get("lastUpdated") or loc_ts
+                                    break
+                            except Exception:
+                                pass
+
+                        steps = child.get("totalSteps") or child.get("steps") or 0
+                        active_mins = child.get("activeMinutes") or 0
+                        battery = child.get("batteryLevel") or device_info.get("batteryLevel")
+
+                        results[child_id] = {
+                            "child_id": child_id,
+                            "child_name": child_name,
+                            "device_id": dev_id,
+                            "device_name": f"{child_name}'s {model}",
+                            "model": model,
+                            "latitude": lat,
+                            "longitude": lon,
+                            "gps_accuracy": accuracy,
+                            "location_timestamp": loc_ts,
+                            "battery_level": battery,
+                            "battery_status": device_info.get("batteryStatus", "NORMAL"),
+                            "steps": steps,
+                            "daily_step_goal": child.get("stepGoal", 6000),
+                            "active_minutes": active_mins,
+                            "last_sync": child.get("lastSyncTime") or time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        }
+
+        # 4. Also include standard devices
         for dev in devices:
             dev_id = str(dev.get("deviceId") or dev.get("deviceNumber") or dev.get("id") or "unknown")
             dev_name = dev.get("displayName") or dev.get("productDisplayName") or "Garmin Watch"
             model = dev.get("partNumber") or dev.get("productDisplayName") or "Garmin Device"
 
-            # Check if this is a Bounce or Junior device or standard wearable
-            child_name = dev.get("assignedName") or dev.get("displayName") or f"Child ({dev_id[-4:]})"
+            child_name = dev.get("assignedName") or dev.get("displayName") or f"Device ({dev_id[-4:]})"
             child_id = str(dev.get("userId") or dev.get("childId") or dev_id)
 
-            # Battery extraction
+            if child_id in results:
+                continue
+
             battery_level = dev.get("batteryLevel")
             battery_status = dev.get("batteryStatus", "NORMAL")
 
-            # Try to fetch device-specific telemetry or location if supported
             lat = None
             lon = None
-            accuracy = None
-            loc_ts = None
-            steps = None
-            active_mins = None
+            accuracy = 15
+            loc_ts = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+            steps = 0
+            active_mins = 0
 
-            # Attempt live tracking / last location lookup for Bounce LTE
+            # Check location for device
             try:
                 loc_data = self.client.connectapi(f"/device-service/device/{dev_id}/location")
-                if isinstance(loc_data, dict):
+                if isinstance(loc_data, dict) and ("latitude" in loc_data or "lat" in loc_data):
                     lat = loc_data.get("latitude") or loc_data.get("lat")
                     lon = loc_data.get("longitude") or loc_data.get("lon") or loc_data.get("lng")
-                    accuracy = loc_data.get("accuracy") or loc_data.get("horizontalAccuracy")
-                    loc_ts = loc_data.get("timestamp") or loc_data.get("lastUpdated")
+                    accuracy = loc_data.get("accuracy") or loc_data.get("horizontalAccuracy") or 15
+                    loc_ts = loc_data.get("timestamp") or loc_data.get("lastUpdated") or loc_ts
             except Exception:
                 pass
 
-            # Summary stats (steps, active minutes)
             try:
                 today_str = time.strftime("%Y-%m-%d")
                 stats = self.client.connectapi(f"/usersummary-service/usersummary/daily/{dev_id}?calendarDate={today_str}")
                 if isinstance(stats, dict):
-                    steps = stats.get("totalSteps") or stats.get("steps")
-                    active_mins = stats.get("activeMinutes") or stats.get("moderateIntensityMinutes")
-                    if not battery_level:
+                    steps = stats.get("totalSteps") or stats.get("steps") or 0
+                    active_mins = stats.get("activeMinutes") or stats.get("moderateIntensityMinutes") or 0
+                    if battery_level is None:
                         battery_level = stats.get("batteryLevel")
             except Exception:
                 pass
@@ -212,13 +293,13 @@ class GarminJrClient:
                 "model": model,
                 "latitude": lat,
                 "longitude": lon,
-                "gps_accuracy": accuracy or 10,
-                "location_timestamp": loc_ts or time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "gps_accuracy": accuracy,
+                "location_timestamp": loc_ts,
                 "battery_level": battery_level,
                 "battery_status": battery_status,
-                "steps": steps or 0,
+                "steps": steps,
                 "daily_step_goal": dev.get("stepGoal", 6000),
-                "active_minutes": active_mins or 0,
+                "active_minutes": active_mins,
                 "last_sync": dev.get("lastSyncTime") or time.strftime("%Y-%m-%dT%H:%M:%SZ"),
             }
 

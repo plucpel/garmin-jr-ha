@@ -3,9 +3,9 @@
   "name": "Garmin Jr",
   "codeowners": ["@ppelleti"],
   "config_flow": true,
-  "documentation": "https://github.com/ppelleti/ha-garmin-jr",
+  "documentation": "https://github.com/plucpel/garmin-jr-ha",
   "integration_type": "hub",
   "iot_class": "cloud_polling",
   "requirements": ["garminconnect>=0.3.6", "curl_cffi>=0.7.0"],
-  "version": "1.0.0"
+  "version": "1.0.1"
 }

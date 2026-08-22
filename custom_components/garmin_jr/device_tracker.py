@@ -3,8 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from homeassistant.components.device_tracker import SourceType
-from homeassistant.components.device_tracker.config_entry import TrackerEntity
+from homeassistant.components.device_tracker import SourceType, TrackerEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -13,7 +12,6 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
     ATTR_ACCURACY,
-    ATTR_BATTERY_LEVEL,
     ATTR_BATTERY_STATUS,
     ATTR_CHILD_ID,
     ATTR_CHILD_NAME,
@@ -106,12 +104,6 @@ class GarminJrTrackerEntity(
     def location_accuracy(self) -> int:
         """Return the location accuracy of the device in meters."""
         return int(self._child_data.get(ATTR_ACCURACY, 15))
-
-    @property
-    def battery_level(self) -> int | None:
-        """Return the battery level of the device."""
-        level = self._child_data.get(ATTR_BATTERY_LEVEL)
-        return int(level) if level is not None else None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
