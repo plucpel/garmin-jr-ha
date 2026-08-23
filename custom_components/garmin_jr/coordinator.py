@@ -56,21 +56,11 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
 
             # Persist updated token data if changed
             current_tokens = self.client.get_token_data()
-            if current_tokens:
-                # Save token to www/garmin_tokens.json for MCP retrieval
-                try:
-                    www_dir = self.hass.config.path("www")
-                    os.makedirs(www_dir, exist_ok=True)
-                    token_path = os.path.join(www_dir, "garmin_tokens.json")
-                    with open(token_path, "w") as f:
-                        json.dump(current_tokens, f)
-                except Exception as err:
-                    LOGGER.debug("Could not write www token file: %s", err)
+            if current_tokens and current_tokens != self.entry.data.get(CONF_TOKEN_DATA):
+                new_data = {**self.entry.data, CONF_TOKEN_DATA: current_tokens}
+                self.hass.config_entries.async_update_entry(self.entry, data=new_data)
+                LOGGER.debug("Persisted updated Garmin session tokens to config entry")
 
-                if current_tokens != self.entry.data.get(CONF_TOKEN_DATA):
-                    new_data = {**self.entry.data, CONF_TOKEN_DATA: current_tokens}
-                    self.hass.config_entries.async_update_entry(self.entry, data=new_data)
-                    LOGGER.debug("Persisted updated Garmin session tokens to config entry")
 
             return data
 

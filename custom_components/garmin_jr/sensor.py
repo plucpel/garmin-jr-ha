@@ -1,6 +1,7 @@
 """Sensor platform for Garmin Jr."""
 from __future__ import annotations
 
+import datetime
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -17,15 +18,19 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
     ATTR_ACTIVE_MINUTES,
+    ATTR_ACTIVE_MINUTES_RECORD,
     ATTR_BATTERY_LEVEL,
     ATTR_BATTERY_STATUS,
     ATTR_CHILD_ID,
     ATTR_CHILD_NAME,
     ATTR_DAILY_STEP_GOAL,
     ATTR_DEVICE_ID,
+    ATTR_FAMILY_ID,
+    ATTR_FAMILY_NAME,
     ATTR_LAST_SYNC,
     ATTR_MODEL,
     ATTR_STEPS,
+    ATTR_STEPS_RECORD,
     DOMAIN,
 )
 from .coordinator import GarminJrDataUpdateCoordinator
@@ -38,6 +43,30 @@ SENSOR_TYPES: dict[str, dict[str, Any]] = {
         "state_class": SensorStateClass.TOTAL_INCREASING,
         "unit": "steps",
         "data_key": ATTR_STEPS,
+    },
+    "step_goal": {
+        "name": "Daily Step Goal",
+        "icon": "mdi:flag-checkered",
+        "device_class": None,
+        "state_class": None,
+        "unit": "steps",
+        "data_key": ATTR_DAILY_STEP_GOAL,
+    },
+    "steps_record": {
+        "name": "Steps Record",
+        "icon": "mdi:trophy-outline",
+        "device_class": None,
+        "state_class": None,
+        "unit": "steps",
+        "data_key": ATTR_STEPS_RECORD,
+    },
+    "active_minutes_record": {
+        "name": "Active Minutes Record",
+        "icon": "mdi:trophy-award",
+        "device_class": SensorDeviceClass.DURATION,
+        "state_class": None,
+        "unit": UnitOfTime.MINUTES,
+        "data_key": ATTR_ACTIVE_MINUTES_RECORD,
     },
     "battery": {
         "name": "Battery",
@@ -137,6 +166,21 @@ class GarminJrSensorEntity(
         """Return state of the sensor."""
         data = self._child_data
         val = data.get(self.spec["data_key"])
+        if self.sensor_type == "last_sync" and val is not None:
+            if isinstance(val, str):
+                try:
+                    dt = datetime.datetime.fromisoformat(val.replace("Z", "+00:00"))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=datetime.timezone.utc)
+                    return dt
+                except Exception:
+                    pass
+            elif isinstance(val, (int, float)):
+                try:
+                    ts = val / 1000.0 if val > 1e11 else float(val)
+                    return datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
+                except Exception:
+                    pass
         return val
 
     @property
@@ -147,17 +191,14 @@ class GarminJrSensorEntity(
             "child_id": self.child_id,
             "device_id": data.get(ATTR_DEVICE_ID),
             "last_sync": data.get(ATTR_LAST_SYNC),
+            "family_id": data.get(ATTR_FAMILY_ID),
+            "family_name": data.get(ATTR_FAMILY_NAME),
         }
         if self.sensor_type == "steps":
             attrs["daily_step_goal"] = data.get(ATTR_DAILY_STEP_GOAL)
+            attrs["steps_record"] = data.get(ATTR_STEPS_RECORD)
         elif self.sensor_type == "battery":
             attrs["battery_status"] = data.get(ATTR_BATTERY_STATUS)
-        elif self.sensor_type == "last_sync":
-            tokens = self.coordinator.client.get_token_data()
-            if tokens:
-                attrs["di_token"] = tokens.get("di_token")
-                attrs["di_refresh_token"] = tokens.get("di_refresh_token")
-                attrs["di_client_id"] = tokens.get("di_client_id")
         return attrs
 
     @property
@@ -169,6 +210,6 @@ class GarminJrSensorEntity(
             identifiers={(DOMAIN, self.child_id)},
             name=child_name,
             manufacturer="Garmin",
-            model=data.get(ATTR_MODEL, "Garmin Bounce / Jr"),
+            model=data.get(ATTR_MODEL, "Garmin Bounce 2"),
             serial_number=str(data.get(ATTR_DEVICE_ID, "")),
         )

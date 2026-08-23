@@ -1,6 +1,18 @@
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
+
+# Local environment & temporary artifacts
 .DS_Store
-.vscode/
+*.apk
+apk_analysis/
+probe_*.py
+*results*.json
+scratch/
 .idea/
+.vscode/
+venv/
+.venv/
+*.log
+garmin_tokens.json

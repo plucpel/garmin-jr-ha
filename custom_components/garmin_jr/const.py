@@ -44,3 +44,8 @@ ATTR_LONGITUDE = "longitude"
 ATTR_ACCURACY = "gps_accuracy"
 ATTR_LOCATION_TIMESTAMP = "location_timestamp"
 ATTR_GEOFENCE_STATUS = "geofence_status"
+ATTR_STEPS_RECORD = "steps_record"
+ATTR_ACTIVE_MINUTES_RECORD = "active_minutes_record"
+ATTR_FAMILY_ID = "family_id"
+ATTR_FAMILY_NAME = "family_name"
+

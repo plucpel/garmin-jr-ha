@@ -50,56 +50,70 @@ class TestGarminJrClient(unittest.TestCase):
         self.assertEqual(dumped["di_token"], "mock_access_token")
         self.assertEqual(dumped["di_refresh_token"], "mock_refresh_token")
 
-    def test_fetch_all_data_mocked(self):
-        """Test parsing of device list and location data."""
+    def test_fetch_all_data_vivokid_mocked(self):
+        """Test parsing of Vivokid family and kids leaderboard data."""
         client = GarminJrClient(token_data={"di_token": "mock"})
         client.client.di_token = "mock"
         client.client._token_expires_soon = MagicMock(return_value=False)
 
-        mock_devices = [
-            {
-                "deviceId": "123456789",
-                "displayName": "Leo's Bounce",
-                "productDisplayName": "Garmin Bounce",
-                "partNumber": "010-02448-00",
-                "batteryLevel": 88,
-                "batteryStatus": "NORMAL",
-                "stepGoal": 7000,
-                "lastSyncTime": "2026-08-22T10:00:00Z",
-            }
-        ]
+        class MockResponse:
+            def __init__(self, status_code, json_data):
+                self.status_code = status_code
+                self._json = json_data
 
-        def mock_connectapi(endpoint):
-            if "deviceregistration/devices" in endpoint:
-                return mock_devices
-            if "location" in endpoint:
-                return {
-                    "latitude": 45.5017,
-                    "longitude": -73.5673,
-                    "horizontalAccuracy": 12,
-                    "timestamp": "2026-08-22T11:45:00Z",
-                }
-            if "usersummary/daily" in endpoint:
-                return {
-                    "totalSteps": 5420,
-                    "activeMinutes": 45,
-                }
-            return {}
+            def json(self):
+                return self._json
 
-        client.client.connectapi = MagicMock(side_effect=mock_connectapi)
+        def mock_get(url, headers=None, timeout=10):
+            if "v2/family/info" in url:
+                return MockResponse(200, {
+                    "status": "OK",
+                    "family": {
+                        "familyId": 12345678,
+                        "name": "Test Family",
+                        "guardians": [],
+                        "kids": []
+                    }
+                })
+            if "leaderboard/daily" in url:
+                return MockResponse(200, {
+                    "kidStepsData": [
+                        {
+                            "id": 98765432,
+                            "displayName": "Alex",
+                            "steps": 6250,
+                            "lastSyncDate": "2026-08-23T10:30:00.000"
+                        }
+                    ]
+                })
+            if "summary/kid" in url:
+                return MockResponse(200, {
+                    "stepsGoal": 7500,
+                    "stepsRecord": 25000,
+                    "lastSyncDate": 1787448776455
+                })
+            if "personalrecords" in url:
+                return MockResponse(200, {
+                    "stepsRecord": 25000,
+                    "activeMinuteRecord": 180
+                })
+            return MockResponse(404, {})
+
+        client.client._api_session.get = MagicMock(side_effect=mock_get)
+        client.client.connectapi = MagicMock(return_value=[])
 
         data = client.fetch_all_data()
-        self.assertIn("123456789", data)
-        record = data["123456789"]
+        self.assertIn("98765432", data)
+        record = data["98765432"]
 
-        self.assertEqual(record["child_name"], "Leo's Bounce")
-        self.assertEqual(record["battery_level"], 88)
-        self.assertEqual(record["steps"], 5420)
-        self.assertEqual(record["active_minutes"], 45)
-        self.assertEqual(record["latitude"], 45.5017)
-        self.assertEqual(record["longitude"], -73.5673)
-        self.assertEqual(record["gps_accuracy"], 12)
-        print("  [OK] Mock telemetry & location parsing verified!")
+        self.assertEqual(record["child_name"], "Alex")
+        self.assertEqual(record["model"], "Garmin Bounce")
+        self.assertEqual(record["steps"], 6250)
+        self.assertEqual(record["daily_step_goal"], 7500)
+        self.assertEqual(record["steps_record"], 25000)
+        self.assertEqual(record["active_minutes_record"], 180)
+        self.assertEqual(record["family_name"], "Test Family")
+        print("  [OK] Vivokid kids & family telemetry parsing verified!")
 
 if __name__ == "__main__":
     unittest.main()
