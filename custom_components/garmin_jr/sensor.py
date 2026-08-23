@@ -104,6 +104,14 @@ SENSOR_TYPES: dict[str, dict[str, Any]] = {
         "unit": None,
         "data_key": ATTR_LAST_MESSAGE,
     },
+    "safe_zone": {
+        "name": "Safe Zone",
+        "icon": "mdi:shield-home-outline",
+        "device_class": None,
+        "state_class": None,
+        "unit": None,
+        "data_key": ATTR_GARMIN_SAFE_ZONE,
+    },
 }
 
 
@@ -178,6 +186,8 @@ class GarminJrSensorEntity(
         """Return state of the sensor."""
         data = self._child_data
         val = data.get(self.spec["data_key"])
+        if self.sensor_type == "safe_zone":
+            return val or "Outside"
         if self.sensor_type == "last_sync" and val is not None:
             if isinstance(val, str):
                 try:
@@ -215,6 +225,10 @@ class GarminJrSensorEntity(
             attrs["sender"] = data.get(ATTR_LAST_MESSAGE_SENDER)
             attrs["timestamp"] = data.get(ATTR_LAST_MESSAGE_TIME)
             attrs["media_type"] = data.get(ATTR_LAST_MESSAGE_MEDIA)
+        elif self.sensor_type == "safe_zone":
+            attrs["geofence_id"] = data.get(ATTR_GARMIN_GEOFENCE_ID)
+            attrs["has_wifi"] = data.get(ATTR_HAS_WIFI, False)
+            attrs["fix_type"] = data.get(ATTR_FIX_TYPE)
         return attrs
 
     @property

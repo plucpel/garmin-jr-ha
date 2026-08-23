@@ -208,6 +208,34 @@ class GarminJrClient:
             _LOGGER.debug("Could not fetch trackpoints for kid %s: %s", kid_profile_id, err)
         return []
 
+    def fetch_geofences(self, kid_profile_id: str | int | None = None) -> list[dict[str, Any]]:
+        """Fetch all configured Garmin Safe Zones / Geofences from GCS API."""
+        try:
+            headers = self._get_it_headers()
+            if kid_profile_id:
+                url = f"{GCS_API_BASE_URL}/geofence/kid/{kid_profile_id}"
+            else:
+                url = f"{GCS_API_BASE_URL}/geofence/all"
+            resp = requests.get(url, headers=headers, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, list):
+                    geofences: list[dict[str, Any]] = []
+                    for g in data:
+                        geofences.append({
+                            "id": g.get("id"),
+                            "name": g.get("name"),
+                            "latitude": g.get("latitude"),
+                            "longitude": g.get("longitude"),
+                            "radius": g.get("radius"),
+                            "wifi_ssid": g.get("wifiSsid"),
+                            "kid_ids": g.get("kidIds", []),
+                        })
+                    return geofences
+        except Exception as err:
+            _LOGGER.debug("Could not fetch Garmin geofences: %s", err)
+        return []
+
     def fetch_messages(self, after_iso: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
         """Fetch message history from GCS Messaging API."""
         try:
@@ -263,7 +291,7 @@ class GarminJrClient:
         return False
 
     def fetch_all_data(self) -> dict[str, dict[str, Any]]:
-        """Fetch all child devices, steps, location, messages, and telemetry."""
+        """Fetch all child devices, steps, location, messages, geofences, and telemetry."""
         if not self.client.is_authenticated:
             if self._raw_token_data:
                 self._load_token_data(self._raw_token_data)
@@ -307,7 +335,16 @@ class GarminJrClient:
         except Exception as msg_err:
             _LOGGER.debug("Error fetching recent messages: %s", msg_err)
 
-        # 3. Fetch Kids from Garmin Jr Leaderboard & Activity Summaries
+        # 3. Fetch Garmin Safe Zones / Geofences across the family
+        all_geofences: list[dict[str, Any]] = []
+        geofence_by_id: dict[str, dict[str, Any]] = {}
+        try:
+            all_geofences = self.fetch_geofences()
+            geofence_by_id = {str(g["id"]): g for g in all_geofences if g.get("id") is not None}
+        except Exception as gf_err:
+            _LOGGER.debug("Error fetching Garmin geofences: %s", gf_err)
+
+        # 4. Fetch Kids from Garmin Jr Leaderboard & Activity Summaries
         if family_id:
             try:
                 lb_url = f"{VIVOKID_BASE_URL}/v2/leaderboard/daily/{family_id}/{today}"
@@ -319,6 +356,13 @@ class GarminJrClient:
                         kid_name = kid.get("displayName") or "Child"
                         live_steps = kid.get("steps") or 0
                         last_sync = kid.get("lastSyncDate")
+
+                        # Filter geofences applicable to this kid
+                        kid_int = int(kid_id) if kid_id.isdigit() else None
+                        kid_geofences = [
+                            g for g in all_geofences
+                            if not g.get("kid_ids") or (kid_int is not None and kid_int in g.get("kid_ids", []))
+                        ]
 
                         # Fetch Daily Step Summary
                         step_goal = 7500
@@ -350,18 +394,45 @@ class GarminJrClient:
                         except Exception as pr_err:
                             _LOGGER.debug("Could not fetch kid personal records for %s: %s", kid_id, pr_err)
 
-                        # Fetch Live GPS Trackpoints
+                        # Fetch Live GPS Trackpoints & Geofence Status
                         latitude = None
                         longitude = None
                         gps_accuracy = 15
                         location_ts = None
+                        fix_type = None
+                        active_geofence_id = None
+                        active_geofence_name = None
+                        has_wifi = False
+                        geofence_lat = None
+                        geofence_lon = None
+                        geofence_radius = None
+
                         trackpoints = self.fetch_trackpoints(kid_id, limit=1)
                         if trackpoints:
                             latest_pt = trackpoints[0]
-                            latitude = latest_pt.get("latitude")
-                            longitude = latest_pt.get("longitude")
-                            gps_accuracy = latest_pt.get("accuracy") or latest_pt.get("horizontalAccuracy") or 15
-                            location_ts = latest_pt.get("timestamp") or latest_pt.get("date")
+                            pos = latest_pt.get("position") or {}
+                            latitude = latest_pt.get("latitude") if latest_pt.get("latitude") is not None else pos.get("latitude")
+                            longitude = latest_pt.get("longitude") if latest_pt.get("longitude") is not None else pos.get("longitude")
+                            gps_accuracy = latest_pt.get("accuracy") or latest_pt.get("accuracyMeters") or latest_pt.get("horizontalAccuracy") or 15
+                            location_ts = latest_pt.get("timestamp") or latest_pt.get("dateTime") or latest_pt.get("date")
+                            fix_type = latest_pt.get("fixType")
+
+                            # Check for active geofence state
+                            fp_data = latest_pt.get("familyPointData") or {}
+                            status_changes = fp_data.get("statusChanges") or []
+                            for sc in status_changes:
+                                dev_state = sc.get("deviceState")
+                                g_id = sc.get("geofenceId")
+                                if dev_state == "GeofenceEnter" or (g_id and dev_state != "GeofenceExit"):
+                                    active_geofence_id = str(g_id)
+                                    gf = geofence_by_id.get(active_geofence_id)
+                                    if gf:
+                                        active_geofence_name = gf.get("name")
+                                        has_wifi = bool(gf.get("wifi_ssid"))
+                                        geofence_lat = gf.get("latitude")
+                                        geofence_lon = gf.get("longitude")
+                                        geofence_radius = gf.get("radius")
+                                    break
 
                         # Match latest message for this child
                         last_msg_text = None
@@ -401,12 +472,20 @@ class GarminJrClient:
                             "last_message_time": last_msg_time,
                             "last_message_sender": last_msg_sender,
                             "last_message_media": last_msg_media,
+                            "garmin_safe_zone": active_geofence_name,
+                            "garmin_geofence_id": active_geofence_id,
+                            "fix_type": fix_type,
+                            "has_wifi": has_wifi,
+                            "geofence_latitude": geofence_lat,
+                            "geofence_longitude": geofence_lon,
+                            "geofence_radius": geofence_radius,
+                            "geofences": kid_geofences,
                             "new_messages": recent_messages,
                         }
             except Exception as lb_err:
                 _LOGGER.warning("Error fetching kid leaderboard for family %s: %s", family_id, lb_err)
 
-        # 4. Discover Adult / Registered Devices (Garmin Connect device registry)
+        # 5. Discover Adult / Registered Devices (Garmin Connect device registry)
         try:
             raw_devices = self.client.connectapi("/device-service/deviceregistration/devices")
             if isinstance(raw_devices, list):
@@ -448,9 +527,15 @@ class GarminJrClient:
                         "last_message_time": None,
                         "last_message_sender": None,
                         "last_message_media": None,
+                        "garmin_safe_zone": None,
+                        "garmin_geofence_id": None,
+                        "fix_type": None,
+                        "has_wifi": False,
+                        "geofences": [],
                         "new_messages": [],
                     }
         except Exception as dev_err:
             _LOGGER.warning("Could not fetch Garmin Connect device list: %s", dev_err)
 
         return results
+

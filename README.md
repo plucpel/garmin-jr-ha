@@ -8,12 +8,14 @@ Custom Home Assistant component for Garmin Jr. and Garmin Bounce smartwatches. P
 
 - **Device Tracker (`device_tracker.<child_name>_location`)**:
   - Real-time GPS coordinates (`latitude`, `longitude`, `accuracy`).
-  - Native Home Assistant Zone detection (`zone.home`, `zone.school`, etc.) for presence detection and location-based automations.
+  - **Safe Zone & Geofence Coupling**: Automatically aligns with Garmin Safe Zones (both Wi-Fi and LTE/cellular) to conserve watch battery and eliminate indoor GPS drift.
+  - **Configurable Zone Matching**: Match each Garmin geofence to any Home Assistant zone (`zone.home`, `zone.school`, etc.) directly from the integration Options Flow.
 - **2-Way Messaging**:
   - `sensor.<child_name>_last_message`: Displays the latest text message, sender, media type, and timestamp.
   - **`garmin_jr_message_received` Event**: Fired whenever a new message arrives from a child's watch, enabling instant Home Assistant automations or TTS announcements.
   - **`garmin_jr.send_message` Action/Service**: Send custom text messages directly to any child's Bounce watch from HA scripts, automations, or dashboards.
 - **Sensors**:
+  - `sensor.<child_name>_safe_zone`: Active Garmin Safe Zone (e.g. `Home`, `School`, or `Outside`).
   - `sensor.<child_name>_daily_steps`: Live daily step count.
   - `sensor.<child_name>_daily_step_goal`: Daily step goal.
   - `sensor.<child_name>_steps_record`: All-time daily step record.

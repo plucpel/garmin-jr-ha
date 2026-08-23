@@ -21,6 +21,7 @@ from .const import (
     CONF_PASSWORD,
     CONF_SCAN_INTERVAL,
     CONF_TOKENS,
+    CONF_ZONE_MAPPING,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
 )
@@ -198,31 +199,91 @@ class GarminJrOptionsFlowHandler(config_entries.OptionsFlow):
     ) -> FlowResult:
         """Manage the options."""
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            scan_interval = user_input.get(
+                CONF_SCAN_INTERVAL,
+                self.config_entry.options.get(
+                    CONF_SCAN_INTERVAL,
+                    self.config_entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
+                ),
+            )
+
+            # Collect zone mapping selections
+            zone_mapping: dict[str, str] = {}
+            for key, val in user_input.items():
+                if key.startswith("zone_") and val:
+                    geofence_id = key.replace("zone_", "")
+                    zone_mapping[geofence_id] = str(val)
+
+            return self.async_create_entry(
+                title="",
+                data={
+                    CONF_SCAN_INTERVAL: scan_interval,
+                    CONF_ZONE_MAPPING: zone_mapping,
+                },
+            )
 
         current_interval = self.config_entry.options.get(
             CONF_SCAN_INTERVAL,
             self.config_entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
         )
 
-        schema = vol.Schema(
-            {
-                vol.Required(
-                    CONF_SCAN_INTERVAL,
-                    default=current_interval,
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=60,
-                        max=3600,
-                        step=30,
-                        unit_of_measurement="seconds",
-                        mode=selector.NumberSelectorMode.BOX,
-                    )
-                ),
-            }
-        )
+        saved_mapping = self.config_entry.options.get(CONF_ZONE_MAPPING, {})
+
+        # 1. Fetch available Home Assistant zones
+        zone_options = [
+            selector.SelectOptionDict(value="auto", label="Auto-Detect (Match by Name / Proximity)"),
+            selector.SelectOptionDict(value="none", label="None (Use Raw GPS / Don't Match)"),
+        ]
+
+        if self.hass:
+            zone_entities = self.hass.states.async_entity_ids("zone")
+            for z_id in sorted(zone_entities):
+                z_state = self.hass.states.get(z_id)
+                friendly = z_state.attributes.get("friendly_name") if z_state else z_id
+                zone_options.append(selector.SelectOptionDict(value=z_id, label=f"{friendly} ({z_id})"))
+
+        # 2. Discover Garmin Safe Zones (geofences) from coordinator data
+        coordinator = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id) if self.hass else None
+        geofences: list[dict[str, Any]] = []
+        if coordinator and coordinator.data:
+            for child_id, child_data in coordinator.data.items():
+                for gf in child_data.get("geofences", []):
+                    if gf.get("id") and gf not in geofences:
+                        geofences.append(gf)
+
+        schema_dict: dict[Any, Any] = {
+            vol.Required(
+                CONF_SCAN_INTERVAL,
+                default=current_interval,
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=60,
+                    max=3600,
+                    step=30,
+                    unit_of_measurement="seconds",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
+        }
+
+        # 3. Add dynamic selectors for each discovered Garmin Safe Zone
+        for gf in geofences:
+            gf_id = str(gf.get("id"))
+            gf_name = gf.get("name") or f"Geofence {gf_id}"
+            wifi_ssid = gf.get("wifi_ssid")
+            wifi_str = f" [Wi-Fi: {wifi_ssid}]" if wifi_ssid else " [LTE Only]"
+            field_key = f"zone_{gf_id}"
+            default_val = saved_mapping.get(gf_id, "auto")
+
+            schema_dict[vol.Optional(field_key, default=default_val)] = selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=zone_options,
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            )
 
         return self.async_show_form(
             step_id="init",
-            data_schema=schema,
+            data_schema=vol.Schema(schema_dict),
         )
+

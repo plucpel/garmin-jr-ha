@@ -25,6 +25,7 @@ CONF_IT_REFRESH_TOKEN = "it_refresh_token"
 CONF_IT_EXPIRES_AT = "it_expires_at"
 
 CONF_SCAN_INTERVAL = "scan_interval"
+CONF_ZONE_MAPPING = "zone_mapping"
 DEFAULT_SCAN_INTERVAL = 300  # 5 minutes
 MIN_SCAN_INTERVAL = 60  # 1 minute
 
@@ -67,5 +68,12 @@ ATTR_LAST_MESSAGE = "last_message"
 ATTR_LAST_MESSAGE_TIME = "last_message_time"
 ATTR_LAST_MESSAGE_SENDER = "last_message_sender"
 ATTR_LAST_MESSAGE_MEDIA = "last_message_media"
+ATTR_GARMIN_SAFE_ZONE = "garmin_safe_zone"
+ATTR_GARMIN_GEOFENCE_ID = "garmin_geofence_id"
+ATTR_MATCHED_HA_ZONE = "matched_ha_zone"
+ATTR_FIX_TYPE = "fix_type"
+ATTR_HAS_WIFI = "has_wifi"
+ATTR_GEOFENCES = "geofences"
+
 
 

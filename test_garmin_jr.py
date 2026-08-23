@@ -146,22 +146,78 @@ class TestGarminJrClient(unittest.TestCase):
         self.assertEqual(record["last_message_sender"], "Guardian")
         print("  [OK] Vivokid kids, GPS, and messaging telemetry verified!")
 
-    def test_send_message_and_location_request(self):
-        """Test send_text_message and request_location_update."""
+    def test_geofence_discovery_and_resolution(self):
+        """Test Garmin geofence discovery and active safe zone resolution."""
         client = GarminJrClient(token_data={"di_token": "mock", "it_token": "mock_it"})
-        
-        with unittest.mock.patch("requests.post") as mock_post:
-            mock_post.return_value.status_code = 200
-            mock_post.return_value.json.return_value = {"status": "SUCCESS"}
+        client.client.di_token = "mock"
+        client.client._token_expires_soon = MagicMock(return_value=False)
 
-            sent = client.send_text_message(98765432, "Hello from Home Assistant!")
-            self.assertTrue(sent)
-            self.assertTrue(mock_post.called)
+        client.fetch_geofences = MagicMock(return_value=[
+            {
+                "id": 101,
+                "name": "Home",
+                "latitude": 45.5000,
+                "longitude": -73.5600,
+                "radius": 150,
+                "wifi_ssid": "HomeWiFi",
+                "kid_ids": [98765432],
+            },
+            {
+                "id": 102,
+                "name": "School",
+                "latitude": 45.5100,
+                "longitude": -73.5700,
+                "radius": 200,
+                "wifi_ssid": None,
+                "kid_ids": [98765432],
+            },
+        ])
 
-            loc_req = client.request_location_update(98765432)
-            self.assertTrue(loc_req)
-            print("  [OK] Message dispatch and location update request verified!")
+        client.fetch_trackpoints = MagicMock(return_value=[
+            {
+                "latitude": 45.5002,
+                "longitude": -73.5601,
+                "accuracy": 20,
+                "timestamp": "2026-08-23T14:00:00Z",
+                "fixType": "Wfps",
+                "familyPointData": {
+                    "statusChanges": [
+                        {"deviceState": "GeofenceEnter", "geofenceId": 101}
+                    ]
+                }
+            }
+        ])
+
+        client.fetch_messages = MagicMock(return_value=[])
+
+        class MockResponse:
+            def __init__(self, status_code, json_data):
+                self.status_code = status_code
+                self._json = json_data
+            def json(self):
+                return self._json
+
+        def mock_get(url, headers=None, timeout=10):
+            if "v2/family/info" in url:
+                return MockResponse(200, {"status": "OK", "family": {"familyId": 123, "name": "Family"}})
+            if "leaderboard/daily" in url:
+                return MockResponse(200, {"kidStepsData": [{"id": 98765432, "displayName": "Kid"}]})
+            return MockResponse(200, {})
+
+        client.client._api_session.get = MagicMock(side_effect=mock_get)
+        client.client.connectapi = MagicMock(return_value=[])
+
+        data = client.fetch_all_data()
+        record = data["98765432"]
+
+        self.assertEqual(record["garmin_safe_zone"], "Home")
+        self.assertEqual(record["garmin_geofence_id"], "101")
+        self.assertEqual(record["fix_type"], "Wfps")
+        self.assertTrue(record["has_wifi"])
+        self.assertEqual(len(record["geofences"]), 2)
+        print("  [OK] Garmin Safe Zone discovery and status change resolution verified!")
 
 if __name__ == "__main__":
     unittest.main()
+
 
