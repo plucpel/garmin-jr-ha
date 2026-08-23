@@ -3,6 +3,7 @@ import json
 import os
 import py_compile
 import sys
+from typing import Any
 import unittest
 from unittest.mock import MagicMock
 
@@ -31,8 +32,100 @@ for json_file in ["manifest.json", "strings.json", "translations/en.json"]:
             print(f"  [FAIL] {json_file} JSON error: {e}")
             sys.exit(1)
 
-# Test GarminJrClient parsing with mock responses
+# Mock homeassistant modules so all component platforms can be imported and executed
+import types
+for mod in [
+    "homeassistant",
+    "homeassistant.config_entries",
+    "homeassistant.core",
+    "homeassistant.const",
+    "homeassistant.exceptions",
+    "homeassistant.helpers",
+    "homeassistant.helpers.device_registry",
+    "homeassistant.helpers.entity_platform",
+    "homeassistant.helpers.update_coordinator",
+    "homeassistant.helpers.selector",
+    "homeassistant.data_entry_flow",
+    "homeassistant.components",
+    "homeassistant.components.sensor",
+    "homeassistant.components.device_tracker",
+    "voluptuous",
+]:
+    if mod not in sys.modules:
+        m = types.ModuleType(mod)
+        m.__path__ = []
+        sys.modules[mod] = m
+
+ha_flow = sys.modules["homeassistant.data_entry_flow"]
+ha_flow.FlowResult = Any
+ha_flow.FlowHandler = type("FlowHandler", (), {})
+
+ha_exceptions = sys.modules["homeassistant.exceptions"]
+ha_exceptions.ConfigEntryAuthFailed = type("ConfigEntryAuthFailed", (Exception,), {})
+
+# Mock common attributes
+ha_platform = sys.modules["homeassistant.helpers.entity_platform"]
+ha_platform.AddEntitiesCallback = Any
+ha_sensor = sys.modules["homeassistant.components.sensor"]
+ha_sensor.SensorEntity = type("SensorEntity", (), {})
+ha_sensor.SensorDeviceClass = type("SensorDeviceClass", (), {"DURATION": "duration", "BATTERY": "battery", "TIMESTAMP": "timestamp"})
+ha_sensor.SensorStateClass = type("SensorStateClass", (), {"TOTAL_INCREASING": "total_increasing", "MEASUREMENT": "measurement"})
+
+ha_const = sys.modules["homeassistant.const"]
+ha_const.PERCENTAGE = "%"
+ha_const.UnitOfTime = type("UnitOfTime", (), {"MINUTES": "min"})
+
+ha_tracker = sys.modules["homeassistant.components.device_tracker"]
+ha_tracker.TrackerEntity = type("TrackerEntity", (), {})
+ha_tracker.SourceType = type("SourceType", (), {"GPS": "gps"})
+
+ha_coord = sys.modules["homeassistant.helpers.update_coordinator"]
+ha_coord.CoordinatorEntity = type("CoordinatorEntity", (object,), {"__class_getitem__": lambda cls, item: cls})
+ha_coord.DataUpdateCoordinator = type("DataUpdateCoordinator", (object,), {"__class_getitem__": lambda cls, item: cls})
+ha_coord.UpdateFailed = type("UpdateFailed", (Exception,), {})
+
+ha_core = sys.modules["homeassistant.core"]
+ha_core.callback = lambda f: f
+ha_core.HomeAssistant = type("HomeAssistant", (), {})
+
+ha_entries = sys.modules["homeassistant.config_entries"]
+ha_entries.ConfigEntry = type("ConfigEntry", (), {})
+ha_entries.ConfigFlow = type("ConfigFlow", (object,), {"__class_getitem__": lambda cls, item: cls, "__init_subclass__": lambda *args, **kwargs: None})
+ha_entries.OptionsFlow = type("OptionsFlow", (), {})
+
+ha_dev_reg = sys.modules["homeassistant.helpers.device_registry"]
+ha_dev_reg.DeviceInfo = type("DeviceInfo", (), {"__init__": lambda *args, **kwargs: None})
+
+ha_sel = sys.modules["homeassistant.helpers.selector"]
+ha_sel.SelectOptionDict = lambda **kwargs: kwargs
+ha_sel.SelectSelector = lambda *args, **kwargs: kwargs
+ha_sel.SelectSelectorConfig = type("SelectSelectorConfig", (), {"__init__": lambda *args, **kwargs: None})
+ha_sel.SelectSelectorMode = type("SelectSelectorMode", (), {"DROPDOWN": "dropdown"})
+ha_sel.NumberSelector = lambda *args, **kwargs: kwargs
+ha_sel.NumberSelectorConfig = type("NumberSelectorConfig", (), {"__init__": lambda *args, **kwargs: None})
+ha_sel.NumberSelectorMode = type("NumberSelectorMode", (), {"BOX": "box"})
+ha_sel.TextSelector = lambda *args, **kwargs: kwargs
+ha_sel.TextSelectorConfig = type("TextSelectorConfig", (), {"__init__": lambda *args, **kwargs: None})
+ha_sel.TextSelectorType = type("TextSelectorType", (), {"EMAIL": "email", "PASSWORD": "password", "TEXT": "text"})
+
+vol = sys.modules["voluptuous"]
+vol.Schema = lambda *args, **kwargs: kwargs
+vol.Required = lambda *args, **kwargs: args[0] if args else "key"
+vol.Optional = lambda *args, **kwargs: args[0] if args else "key"
+
+sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "custom_components", "garmin_jr"))
+
+print("Checking Python module execution and imports...")
+import custom_components.garmin_jr.const
+import custom_components.garmin_jr.garmin_client
+import custom_components.garmin_jr.coordinator
+import custom_components.garmin_jr.device_tracker
+import custom_components.garmin_jr.sensor
+import custom_components.garmin_jr.config_flow
+import custom_components.garmin_jr
+print("  [OK] All modules imported and executed successfully!")
+
 from garmin_client import GarminJrClient
 
 class TestGarminJrClient(unittest.TestCase):
