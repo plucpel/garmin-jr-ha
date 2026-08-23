@@ -44,15 +44,20 @@ class TestGarminJrClient(unittest.TestCase):
             "di_token": "mock_access_token",
             "di_refresh_token": "mock_refresh_token",
             "di_client_id": "mock_client_id",
+            "it_token": "mock_it_token",
+            "it_refresh_token": "mock_it_refresh",
+            "it_expires_at": 1787499999.0,
         }
         client = GarminJrClient(token_data=tokens)
         dumped = client.get_token_data()
         self.assertEqual(dumped["di_token"], "mock_access_token")
         self.assertEqual(dumped["di_refresh_token"], "mock_refresh_token")
+        self.assertEqual(dumped["it_token"], "mock_it_token")
+        self.assertEqual(dumped["it_refresh_token"], "mock_it_refresh")
 
     def test_fetch_all_data_vivokid_mocked(self):
-        """Test parsing of Vivokid family and kids leaderboard data."""
-        client = GarminJrClient(token_data={"di_token": "mock"})
+        """Test parsing of Vivokid family, kids leaderboard, GPS trackpoints, and messages."""
+        client = GarminJrClient(token_data={"di_token": "mock", "it_token": "mock_it"})
         client.client.di_token = "mock"
         client.client._token_expires_soon = MagicMock(return_value=False)
 
@@ -80,7 +85,7 @@ class TestGarminJrClient(unittest.TestCase):
                     "kidStepsData": [
                         {
                             "id": 98765432,
-                            "displayName": "Alex",
+                            "displayName": "TestChild",
                             "steps": 6250,
                             "lastSyncDate": "2026-08-23T10:30:00.000"
                         }
@@ -102,18 +107,61 @@ class TestGarminJrClient(unittest.TestCase):
         client.client._api_session.get = MagicMock(side_effect=mock_get)
         client.client.connectapi = MagicMock(return_value=[])
 
+        # Mock GPS trackpoints and messages
+        client.fetch_trackpoints = MagicMock(return_value=[
+            {
+                "latitude": 45.5017,
+                "longitude": -73.5673,
+                "accuracy": 8,
+                "timestamp": "2026-08-23T12:00:00Z"
+            }
+        ])
+        client.fetch_messages = MagicMock(return_value=[
+            {
+                "messageId": "msg-12345",
+                "toUserProfilePk": 98765432,
+                "fromUserProfilePk": 11111111,
+                "senderDisplayName": "Guardian",
+                "messageText": "Dinner is ready!",
+                "mediaType": "Text",
+                "createdTimestamp": "2026-08-23T12:05:00Z"
+            }
+        ])
+
         data = client.fetch_all_data()
         self.assertIn("98765432", data)
         record = data["98765432"]
 
-        self.assertEqual(record["child_name"], "Alex")
+        self.assertEqual(record["child_name"], "TestChild")
         self.assertEqual(record["model"], "Garmin Bounce")
         self.assertEqual(record["steps"], 6250)
         self.assertEqual(record["daily_step_goal"], 7500)
         self.assertEqual(record["steps_record"], 25000)
         self.assertEqual(record["active_minutes_record"], 180)
         self.assertEqual(record["family_name"], "Test Family")
-        print("  [OK] Vivokid kids & family telemetry parsing verified!")
+        self.assertEqual(record["latitude"], 45.5017)
+        self.assertEqual(record["longitude"], -73.5673)
+        self.assertEqual(record["gps_accuracy"], 8)
+        self.assertEqual(record["last_message"], "Dinner is ready!")
+        self.assertEqual(record["last_message_sender"], "Guardian")
+        print("  [OK] Vivokid kids, GPS, and messaging telemetry verified!")
+
+    def test_send_message_and_location_request(self):
+        """Test send_text_message and request_location_update."""
+        client = GarminJrClient(token_data={"di_token": "mock", "it_token": "mock_it"})
+        
+        with unittest.mock.patch("requests.post") as mock_post:
+            mock_post.return_value.status_code = 200
+            mock_post.return_value.json.return_value = {"status": "SUCCESS"}
+
+            sent = client.send_text_message(98765432, "Hello from Home Assistant!")
+            self.assertTrue(sent)
+            self.assertTrue(mock_post.called)
+
+            loc_req = client.request_location_update(98765432)
+            self.assertTrue(loc_req)
+            print("  [OK] Message dispatch and location update request verified!")
 
 if __name__ == "__main__":
     unittest.main()
+

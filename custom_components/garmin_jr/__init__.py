@@ -8,6 +8,10 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .const import (
+    ATTR_CHILD_ID,
+    ATTR_CHILD_NAME,
+    ATTR_MESSAGE,
+    ATTR_TARGET,
     CONF_DI_CLIENT_ID,
     CONF_DI_REFRESH_TOKEN,
     CONF_DI_TOKEN,
@@ -17,6 +21,8 @@ from .const import (
     DOMAIN,
     LOGGER,
     PLATFORMS,
+    SERVICE_REQUEST_LOCATION_UPDATE,
+    SERVICE_SEND_MESSAGE,
 )
 from .coordinator import GarminJrDataUpdateCoordinator
 from .garmin_client import GarminJrClient
@@ -25,8 +31,70 @@ _LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
-    """Set up the Garmin Jr component."""
+    """Set up the Garmin Jr component services."""
     hass.data.setdefault(DOMAIN, {})
+
+    async def async_handle_send_message(call: Any) -> None:
+        """Handle send_message service call."""
+        target = str(call.data.get(ATTR_TARGET, "")).strip()
+        message = str(call.data.get(ATTR_MESSAGE, "")).strip()
+
+        if not message:
+            _LOGGER.warning("Garmin Jr send_message called with empty message")
+            return
+
+        for entry_id, coordinator in hass.data.get(DOMAIN, {}).items():
+            if not isinstance(coordinator, GarminJrDataUpdateCoordinator) or not coordinator.data:
+                continue
+
+            target_kid_id = None
+            # Match by ID or Name dynamically
+            for kid_id, kid_data in coordinator.data.items():
+                if not target or target.lower() in (kid_id.lower(), kid_data.get(ATTR_CHILD_NAME, "").lower()):
+                    target_kid_id = kid_id
+                    break
+
+            if target_kid_id:
+                success = await hass.async_add_executor_job(
+                    coordinator.client.send_text_message, target_kid_id, message
+                )
+                if success:
+                    _LOGGER.debug("Sent Garmin Jr message to %s", target_kid_id)
+                    await coordinator.async_request_refresh()
+                return
+
+        _LOGGER.warning("Could not find Garmin Jr child profile matching target: %s", target)
+
+    async def async_handle_request_location_update(call: Any) -> None:
+        """Handle request_location_update service call."""
+        target = str(call.data.get(ATTR_TARGET, "")).strip()
+
+        for entry_id, coordinator in hass.data.get(DOMAIN, {}).items():
+            if not isinstance(coordinator, GarminJrDataUpdateCoordinator) or not coordinator.data:
+                continue
+
+            target_kid_id = None
+            for kid_id, kid_data in coordinator.data.items():
+                if not target or target.lower() in (kid_id.lower(), kid_data.get(ATTR_CHILD_NAME, "").lower()):
+                    target_kid_id = kid_id
+                    break
+
+            if target_kid_id:
+                success = await hass.async_add_executor_job(
+                    coordinator.client.request_location_update, target_kid_id
+                )
+                if success:
+                    _LOGGER.debug("Requested location refresh for %s", target_kid_id)
+                    await coordinator.async_request_refresh()
+                return
+
+        _LOGGER.warning("Could not find Garmin Jr child profile matching target: %s", target)
+
+    hass.services.async_register(DOMAIN, SERVICE_SEND_MESSAGE, async_handle_send_message)
+    hass.services.async_register(
+        DOMAIN, SERVICE_REQUEST_LOCATION_UPDATE, async_handle_request_location_update
+    )
+
     return True
 
 
@@ -76,3 +144,4 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Reload config entry when options change."""
     await hass.config_entries.async_reload(entry.entry_id)
+

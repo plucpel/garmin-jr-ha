@@ -27,6 +27,10 @@ from .const import (
     ATTR_DEVICE_ID,
     ATTR_FAMILY_ID,
     ATTR_FAMILY_NAME,
+    ATTR_LAST_MESSAGE,
+    ATTR_LAST_MESSAGE_MEDIA,
+    ATTR_LAST_MESSAGE_SENDER,
+    ATTR_LAST_MESSAGE_TIME,
     ATTR_LAST_SYNC,
     ATTR_MODEL,
     ATTR_STEPS,
@@ -91,6 +95,14 @@ SENSOR_TYPES: dict[str, dict[str, Any]] = {
         "state_class": None,
         "unit": None,
         "data_key": ATTR_LAST_SYNC,
+    },
+    "last_message": {
+        "name": "Last Message",
+        "icon": "mdi:message-text-outline",
+        "device_class": None,
+        "state_class": None,
+        "unit": None,
+        "data_key": ATTR_LAST_MESSAGE,
     },
 }
 
@@ -199,6 +211,10 @@ class GarminJrSensorEntity(
             attrs["steps_record"] = data.get(ATTR_STEPS_RECORD)
         elif self.sensor_type == "battery":
             attrs["battery_status"] = data.get(ATTR_BATTERY_STATUS)
+        elif self.sensor_type == "last_message":
+            attrs["sender"] = data.get(ATTR_LAST_MESSAGE_SENDER)
+            attrs["timestamp"] = data.get(ATTR_LAST_MESSAGE_TIME)
+            attrs["media_type"] = data.get(ATTR_LAST_MESSAGE_MEDIA)
         return attrs
 
     @property
@@ -213,3 +229,4 @@ class GarminJrSensorEntity(
             model=data.get(ATTR_MODEL, "Garmin Bounce 2"),
             serial_number=str(data.get(ATTR_DEVICE_ID, "")),
         )
+

@@ -13,10 +13,13 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
+    ATTR_CHILD_ID,
+    ATTR_CHILD_NAME,
     CONF_SCAN_INTERVAL,
     CONF_TOKEN_DATA,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
+    EVENT_MESSAGE_RECEIVED,
     LOGGER,
 )
 from .garmin_client import GarminJrAuthError, GarminJrClient, GarminJrConnectionError
@@ -36,6 +39,8 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
         """Initialize the coordinator."""
         self.client = client
         self.entry = entry
+        self._seen_message_ids: set[str] = set()
+        self._initial_fetch_done: bool = False
 
         scan_interval_seconds = entry.options.get(
             CONF_SCAN_INTERVAL,
@@ -61,7 +66,31 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
                 self.hass.config_entries.async_update_entry(self.entry, data=new_data)
                 LOGGER.debug("Persisted updated Garmin session tokens to config entry")
 
+            # Check for new messages and fire events
+            for child_id, child_data in data.items():
+                new_msgs = child_data.get("new_messages", [])
+                for msg in new_msgs:
+                    msg_id = str(msg.get("messageId") or "")
+                    if not msg_id:
+                        continue
 
+                    if msg_id not in self._seen_message_ids:
+                        self._seen_message_ids.add(msg_id)
+                        # Only fire event after initial startup load to avoid replay storms
+                        if self._initial_fetch_done:
+                            event_data = {
+                                "child_id": child_id,
+                                "child_name": child_data.get(ATTR_CHILD_NAME, "Child"),
+                                "message_id": msg_id,
+                                "text": msg.get("messageText") or msg.get("text"),
+                                "sender": msg.get("senderDisplayName") or msg.get("sender"),
+                                "media_type": msg.get("mediaType", "Text"),
+                                "timestamp": msg.get("createdTimestamp"),
+                            }
+                            self.hass.bus.async_fire(EVENT_MESSAGE_RECEIVED, event_data)
+                            LOGGER.debug("Fired %s event for message %s", EVENT_MESSAGE_RECEIVED, msg_id)
+
+            self._initial_fetch_done = True
             return data
 
         except GarminJrAuthError as err:
@@ -71,3 +100,4 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
         except Exception as err:
             LOGGER.exception("Unexpected error fetching Garmin Jr data: %s", err)
             raise UpdateFailed(f"Unexpected error: {err}") from err
+

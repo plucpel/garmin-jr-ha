@@ -16,3 +16,4 @@ venv/
 .venv/
 *.log
 garmin_tokens.json
+/ha_garmin_jr_latest_apk/

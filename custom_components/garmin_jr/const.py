@@ -20,12 +20,27 @@ CONF_TOKENS = "tokens"
 CONF_DI_TOKEN = "di_token"
 CONF_DI_REFRESH_TOKEN = "di_refresh_token"
 CONF_DI_CLIENT_ID = "di_client_id"
+CONF_IT_TOKEN = "it_token"
+CONF_IT_REFRESH_TOKEN = "it_refresh_token"
+CONF_IT_EXPIRES_AT = "it_expires_at"
 
 CONF_SCAN_INTERVAL = "scan_interval"
 DEFAULT_SCAN_INTERVAL = 300  # 5 minutes
 MIN_SCAN_INTERVAL = 60  # 1 minute
 
 PLATFORMS = ["device_tracker", "sensor"]
+
+# Events
+EVENT_MESSAGE_RECEIVED = "garmin_jr_message_received"
+
+# Services
+SERVICE_SEND_MESSAGE = "send_message"
+SERVICE_REQUEST_LOCATION_UPDATE = "request_location_update"
+SERVICE_SET_STEP_GOAL = "set_step_goal"
+
+ATTR_MESSAGE = "message"
+ATTR_TARGET = "target"
+ATTR_GOAL = "goal"
 
 # Data keys
 ATTR_CHILD_ID = "child_id"
@@ -48,4 +63,9 @@ ATTR_STEPS_RECORD = "steps_record"
 ATTR_ACTIVE_MINUTES_RECORD = "active_minutes_record"
 ATTR_FAMILY_ID = "family_id"
 ATTR_FAMILY_NAME = "family_name"
+ATTR_LAST_MESSAGE = "last_message"
+ATTR_LAST_MESSAGE_TIME = "last_message_time"
+ATTR_LAST_MESSAGE_SENDER = "last_message_sender"
+ATTR_LAST_MESSAGE_MEDIA = "last_message_media"
+
 
