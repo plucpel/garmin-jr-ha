@@ -100,43 +100,113 @@ class GarminJrClient:
 
         return base_tokens
 
-    def _refresh_it_token_if_needed(self) -> None:
-        """Refresh the IT token if expired or close to expiry."""
-        now = time.time()
-        if self._it_expires_at and (now + 300) < self._it_expires_at and self._it_token:
-            return
+    def _extract_di_token(self) -> str | None:
+        """Extract DI access token from underlying client or garth instance."""
+        for attr in ("di_token", "access_token", "token"):
+            val = getattr(self.client, attr, None)
+            if isinstance(val, str) and val:
+                return val
 
-        if not self._it_refresh_token:
-            return
+        garth = getattr(self.client, "garth", None)
+        if garth:
+            oauth2 = getattr(garth, "oauth2_token", None)
+            if oauth2:
+                for attr in ("access_token", "token"):
+                    val = getattr(oauth2, attr, None)
+                    if isinstance(val, str) and val:
+                        return val
+                if isinstance(oauth2, dict) and oauth2.get("access_token"):
+                    return oauth2["access_token"]
 
         try:
-            url = f"{SERVICES_BASE_URL}/api/oauth/token"
-            headers = {
-                "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent": "GarminJr/5.23.0 (Android)",
-            }
-            data = {
-                "grant_type": "refresh_token",
-                "client_id": "VIVOFIT_JR_ANDROID",
-                "refresh_token": self._it_refresh_token,
-            }
-            resp = requests.post(url, headers=headers, data=data, timeout=15)
-            if resp.status_code == 200:
-                res_data = resp.json()
-                self._it_token = res_data.get("access_token")
-                self._it_refresh_token = res_data.get("refresh_token", self._it_refresh_token)
-                expires_in = res_data.get("expires_in", 3600)
-                self._it_expires_at = now + expires_in
-                _LOGGER.debug("Refreshed Garmin IT OAuth2 token successfully")
-            else:
-                _LOGGER.warning("Garmin IT token refresh failed: %s %s", resp.status_code, resp.text)
-        except Exception as err:
-            _LOGGER.warning("Exception during IT token refresh: %s", err)
+            raw = self.client.dumps()
+            if raw:
+                try:
+                    td = json.loads(raw)
+                    if isinstance(td, dict):
+                        return td.get("di_token") or td.get("access_token") or td.get("token")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        try:
+            hdrs = self.client.get_api_headers()
+            auth = hdrs.get("Authorization", "")
+            if auth.startswith("Bearer "):
+                return auth[7:].strip()
+        except Exception:
+            pass
+
+        return None
+
+    def _ensure_it_token(self) -> None:
+        """Ensure a valid IT token exists, exchanging DI token or refreshing if needed."""
+        now = time.time()
+        if self._it_token and self._it_expires_at and (now + 300) < self._it_expires_at:
+            return
+
+        # 1. Try refresh token if available
+        if self._it_refresh_token:
+            try:
+                url = f"{SERVICES_BASE_URL}/api/oauth/token"
+                headers = {
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "User-Agent": "GarminJr/5.23.0 (Android)",
+                }
+                data = {
+                    "grant_type": "refresh_token",
+                    "client_id": "VIVOFIT_JR_ANDROID",
+                    "refresh_token": self._it_refresh_token,
+                }
+                resp = requests.post(url, headers=headers, data=data, timeout=15)
+                if resp.status_code == 200:
+                    res_data = resp.json()
+                    self._it_token = res_data.get("access_token")
+                    self._it_refresh_token = res_data.get("refresh_token", self._it_refresh_token)
+                    expires_in = res_data.get("expires_in", 3600)
+                    self._it_expires_at = now + expires_in
+                    _LOGGER.debug("Refreshed Garmin IT OAuth2 token successfully")
+                    return
+                else:
+                    _LOGGER.debug("Garmin IT token refresh failed: %s %s", resp.status_code, resp.text)
+            except Exception as err:
+                _LOGGER.debug("Exception during IT token refresh: %s", err)
+
+        # 2. Exchange DI token for IT token
+        di_token = self._extract_di_token()
+        if di_token:
+            try:
+                url = f"{SERVICES_BASE_URL}/oauthTokenExchangeService/connectToIT"
+                headers = {
+                    "Content-Type": "application/json",
+                    "User-Agent": "GarminJr/5.23.0 (Android)",
+                    "Accept": "application/json",
+                    "X-garmin-client-id": "VIVOFIT_JR_ANDROID",
+                    "Garmin-Client-Id": "VIVOFIT_JR_ANDROID",
+                }
+                payload = {
+                    "connectAccessToken": di_token,
+                    "itOAuthClientId": "VIVOFIT_JR_ANDROID",
+                }
+                resp = requests.post(url, headers=headers, json=payload, timeout=15)
+                if resp.status_code == 200:
+                    res_data = resp.json()
+                    self._it_token = res_data.get("accessToken") or res_data.get("token")
+                    self._it_refresh_token = res_data.get("refreshToken", self._it_refresh_token)
+                    expires_in = res_data.get("expiresIn", 3600)
+                    self._it_expires_at = now + expires_in
+                    _LOGGER.debug("Exchanged DI token for Garmin IT OAuth2 token successfully")
+                    return
+                else:
+                    _LOGGER.warning("DI to IT token exchange returned %s: %s", resp.status_code, resp.text)
+            except Exception as err:
+                _LOGGER.warning("Exception during DI to IT token exchange: %s", err)
 
     def _get_it_headers(self) -> dict[str, str]:
         """Get headers for Garmin LTE / GCS API endpoints."""
-        self._refresh_it_token_if_needed()
-        token = self._it_token or getattr(self.client, "di_token", "")
+        self._ensure_it_token()
+        token = self._it_token or self._extract_di_token() or ""
         headers = {
             "Authorization": f"Bearer {token}",
             "User-Agent": "GarminJr/5.23.0 (Android)",
@@ -367,6 +437,7 @@ class GarminJrClient:
                         # Fetch Daily Step Summary
                         step_goal = 7500
                         steps_record = None
+                        active_mins = None
                         try:
                             sum_url = f"{VIVOKID_BASE_URL}/v2/activity/summary/kid/{kid_id}/{today}"
                             sum_resp = sess.get(sum_url, headers=headers, timeout=10)
@@ -374,6 +445,11 @@ class GarminJrClient:
                                 sum_data = sum_resp.json()
                                 step_goal = sum_data.get("stepsGoal") or step_goal
                                 steps_record = sum_data.get("stepsRecord")
+                                active_mins = (
+                                    sum_data.get("activeMinutes")
+                                    or sum_data.get("activeMinute")
+                                    or ((sum_data.get("walkingMinutes") or 0) + (sum_data.get("runningMinutes") or 0))
+                                )
                                 if sum_data.get("lastSyncDate"):
                                     ts_ms = sum_data.get("lastSyncDate")
                                     last_sync = datetime.datetime.fromtimestamp(
@@ -393,6 +469,23 @@ class GarminJrClient:
                                 active_mins_record = pr_data.get("activeMinuteRecord")
                         except Exception as pr_err:
                             _LOGGER.debug("Could not fetch kid personal records for %s: %s", kid_id, pr_err)
+
+                        # Query Device Info & Battery
+                        battery_level = None
+                        battery_status = "NORMAL"
+                        try:
+                            dinfo = self.client.connectapi(f"/wellness-service/wellness/deviceInfo/{kid_id}")
+                            if isinstance(dinfo, dict):
+                                if dinfo.get("batteryLevel") is not None:
+                                    battery_level = dinfo.get("batteryLevel")
+                                if dinfo.get("batteryStatus"):
+                                    battery_status = str(dinfo.get("batteryStatus")).upper()
+                                if dinfo.get("lastSyncDate") and not last_sync:
+                                    last_sync = datetime.datetime.fromtimestamp(
+                                        dinfo.get("lastSyncDate") / 1000.0, tz=datetime.timezone.utc
+                                    ).isoformat()
+                        except Exception as d_err:
+                            _LOGGER.debug("Could not query device info for kid %s: %s", kid_id, d_err)
 
                         # Fetch Live GPS Trackpoints & Geofence Status
                         latitude = None
@@ -459,11 +552,12 @@ class GarminJrClient:
                             "longitude": longitude,
                             "gps_accuracy": gps_accuracy,
                             "location_timestamp": location_ts or time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                            "battery_level": None,
-                            "battery_status": "NORMAL",
+                            "battery_level": battery_level,
+                            "battery_status": battery_status,
                             "steps": live_steps,
                             "daily_step_goal": step_goal,
                             "steps_record": steps_record,
+                            "active_minutes": active_mins,
                             "active_minutes_record": active_mins_record,
                             "last_sync": last_sync or time.strftime("%Y-%m-%dT%H:%M:%SZ"),
                             "family_id": family_id,
@@ -497,11 +591,24 @@ class GarminJrClient:
                     child_name = dev.get("assignedName") or dev.get("displayName") or f"Device ({dev_id[-4:]})"
                     child_id = str(dev.get("userId") or dev.get("childId") or dev_id)
 
+                    dev_battery_level = dev.get("batteryLevel")
+                    dev_battery_status = dev.get("batteryStatus", "NORMAL")
+                    if dev_battery_level is None:
+                        try:
+                            dinfo = self.client.connectapi(f"/wellness-service/wellness/deviceInfo/{dev_id}")
+                            if isinstance(dinfo, dict):
+                                if dinfo.get("batteryLevel") is not None:
+                                    dev_battery_level = dinfo.get("batteryLevel")
+                                if dinfo.get("batteryStatus"):
+                                    dev_battery_status = str(dinfo.get("batteryStatus")).upper()
+                        except Exception:
+                            pass
+
                     if child_id in results:
-                        if dev.get("batteryLevel") is not None:
-                            results[child_id]["battery_level"] = dev.get("batteryLevel")
-                        if dev.get("batteryStatus"):
-                            results[child_id]["battery_status"] = dev.get("batteryStatus")
+                        if dev_battery_level is not None:
+                            results[child_id]["battery_level"] = dev_battery_level
+                        if dev_battery_status:
+                            results[child_id]["battery_status"] = dev_battery_status
                         continue
 
                     results[child_id] = {
@@ -514,11 +621,12 @@ class GarminJrClient:
                         "longitude": None,
                         "gps_accuracy": 15,
                         "location_timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                        "battery_level": dev.get("batteryLevel"),
-                        "battery_status": dev.get("batteryStatus", "NORMAL"),
+                        "battery_level": dev_battery_level,
+                        "battery_status": dev_battery_status,
                         "steps": 0,
                         "daily_step_goal": 10000,
                         "steps_record": None,
+                        "active_minutes": None,
                         "active_minutes_record": None,
                         "last_sync": dev.get("lastSyncTime") or time.strftime("%Y-%m-%dT%H:%M:%SZ"),
                         "family_id": family_id,
