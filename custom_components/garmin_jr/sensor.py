@@ -192,6 +192,8 @@ class GarminJrSensorEntity(
         val = data.get(self.spec["data_key"])
         if self.sensor_type == "safe_zone":
             return val or "Outside"
+        if self.sensor_type in ("steps", "active_minutes"):
+            return val if val is not None else 0
         if self.sensor_type == "last_sync" and val is not None:
             if isinstance(val, str):
                 try:

@@ -88,8 +88,7 @@ class GarminJrTrackerEntity(
     @property
     def name(self) -> str:
         """Return entity display name."""
-        child_name = self._child_data.get(ATTR_CHILD_NAME, "Child")
-        return f"{child_name} Location"
+        return "Location"
 
     @property
     def source_type(self) -> SourceType:
