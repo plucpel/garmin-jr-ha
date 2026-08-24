@@ -208,51 +208,35 @@ class GarminJrClient:
             except Exception as err:
                 _LOGGER.debug("Exception during IT token refresh: %s", err)
 
-        # 2. Exchange via connectToIT using guardian oauthToken from family/info
+        # 2. Exchange diauth token for IT OAuth2 via connect2_exchange
         jr_token = self._ensure_diauth_token()
         if not jr_token:
             return
 
         try:
-            fam_headers = {
-                "Authorization": f"Bearer {jr_token}",
-                "User-Agent": "GarminJr/2.0.0 (Android)",
-                "Accept": "application/json",
+            ex_url = f"{SERVICES_BASE_URL}/api/oauth/token?grant_type=connect2_exchange"
+            ex_data = {
+                "client_id": "VIVOFIT_JR_ANDROID",
+                "connect_access_token": jr_token,
             }
-            fam_resp = requests.get(f"{VIVOKID_BASE_URL}/v3/family/info", headers=fam_headers, timeout=10)
-            if fam_resp.status_code == 200:
-                fam_data = fam_resp.json()
-                families = fam_data.get("families", [])
-                if families:
-                    guardians = families[0].get("guardians", [])
-                    admin_guardians = [g for g in guardians if g.get("role") == "ADMIN"]
-                    target_guardian = admin_guardians[0] if admin_guardians else (guardians[0] if guardians else {})
-                    guardian_token = target_guardian.get("account", {}).get("oauthToken")
-
-                    if guardian_token:
-                        ex_url = f"{SERVICES_BASE_URL}/oauthTokenExchangeService/connectToIT"
-                        ex_body = {
-                            "connectAccessToken": guardian_token,
-                            "itOAuthClientId": "VIVOFIT_JR_ANDROID",
-                        }
-                        ex_headers = {
-                            "Content-Type": "application/json",
-                            "User-Agent": "GarminJr/2.0.0 (Android)",
-                            "X-garmin-client-id": "VIVOFIT_JR_ANDROID",
-                        }
-                        ex_res = requests.post(ex_url, json=ex_body, headers=ex_headers, timeout=15)
-                        if ex_res.status_code == 200:
-                            ex_data = ex_res.json()
-                            self._it_token = ex_data.get("accessToken") or ex_data.get("access_token")
-                            self._it_refresh_token = ex_data.get("refreshToken") or ex_data.get("refresh_token")
-                            expires_in = ex_data.get("expiresIn") or ex_data.get("expires_in", 7776000)
-                            self._it_expires_at = now + expires_in
-                            _LOGGER.debug("Obtained Garmin IT OAuth2 token via connectToIT successfully")
-                            return
-                        else:
-                            _LOGGER.debug("connectToIT returned %s: %s", ex_res.status_code, ex_res.text)
+            ex_headers = {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept-Encoding": "en_US",
+                "User-Agent": "GarminJr/2.0.0 (Android)",
+            }
+            ex_res = requests.post(ex_url, data=ex_data, headers=ex_headers, timeout=15)
+            if ex_res.status_code == 200:
+                ex_json = ex_res.json()
+                self._it_token = ex_json.get("access_token")
+                self._it_refresh_token = ex_json.get("refresh_token")
+                expires_in = ex_json.get("expires_in", 7776000)
+                self._it_expires_at = now + expires_in
+                _LOGGER.debug("Obtained Garmin IT OAuth2 token via connect2_exchange successfully")
+                return
+            else:
+                _LOGGER.debug("connect2_exchange returned %s: %s", ex_res.status_code, ex_res.text)
         except Exception as err:
-            _LOGGER.debug("Exception during connectToIT token exchange: %s", err)
+            _LOGGER.debug("Exception during connect2_exchange token exchange: %s", err)
 
     def _get_diauth_headers(self) -> dict[str, str]:
         """Get headers for Garmin Jr / Vivokid API endpoints."""
@@ -320,19 +304,29 @@ class GarminJrClient:
             _LOGGER.debug("Session validation failed: %s", err)
             return False
 
-    def fetch_trackpoints(self, kid_profile_id: str | int, limit: int = 1) -> list[dict[str, Any]]:
-        """Fetch latest GPS trackpoints for a child profile from GCS API."""
+    def fetch_trackpoints(self, kid_profile_id: str | int, limit: int = 50, connect_id: str | int | None = None) -> list[dict[str, Any]]:
+        """Fetch latest GPS trackpoints for a child profile from GCS Tracker API.
+
+        The tracker API requires the kid's connectId (not the Garmin Jr kid id).
+        If connect_id is provided, it is used; otherwise kid_profile_id is used.
+        """
+        tracker_id = str(connect_id) if connect_id else str(kid_profile_id)
         try:
             headers = self._get_it_headers()
             url = f"{GCS_API_BASE_URL}/tracker/family/api/v1/trackpoints"
-            params = {"kidProfileId": str(kid_profile_id), "limit": limit}
-            resp = requests.get(url, headers=headers, params=params, timeout=10)
+            begin = (
+                datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2)
+            ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            params: dict[str, Any] = {"kidProfileId": tracker_id, "begin": begin, "limit": limit}
+            resp = requests.get(url, headers=headers, params=params, timeout=15)
             if resp.status_code == 200:
                 data = resp.json()
                 if isinstance(data, list):
                     return data
                 if isinstance(data, dict):
                     return data.get("trackPoints") or data.get("points") or []
+            else:
+                _LOGGER.debug("Trackpoints API returned %s for kid %s (connectId=%s)", resp.status_code, kid_profile_id, tracker_id)
         except Exception as err:
             _LOGGER.debug("Could not fetch trackpoints for kid %s: %s", kid_profile_id, err)
         return []
@@ -451,16 +445,24 @@ class GarminJrClient:
                     family_id = family.get("familyId")
                     family_name = family.get("name")
                     kids_list = family.get("kids", [])
+                    # Parse geofences from family info (fallback for /geofence/all)
+                    family_geofences = family.get("geofences") or []
+                    if family_geofences:
+                        _LOGGER.debug("Found %d geofences in family info", len(family_geofences))
                 elif fam_data.get("family"):
                     family = fam_data.get("family", {})
                     family_id = family.get("familyId")
                     family_name = family.get("name")
                     kids_list = family.get("kids", [])
+                    family_geofences = family.get("geofences") or []
+                else:
+                    family_geofences = []
                 self._family_id = family_id
                 self._family_name = family_name
                 _LOGGER.debug("Discovered Garmin Jr Family: %s (ID: %s)", family_name, family_id)
         except Exception as err:
             _LOGGER.warning("Error querying Garmin Jr family info: %s", err)
+            family_geofences = []
 
         # 2. Fetch Recent Messages across the family
         recent_messages: list[dict[str, Any]] = []
@@ -474,6 +476,19 @@ class GarminJrClient:
         geofence_by_id: dict[str, dict[str, Any]] = {}
         try:
             all_geofences = self.fetch_geofences()
+            # Fallback: use geofences from family info if /geofence/all returned empty
+            if not all_geofences and family_geofences:
+                for g in family_geofences:
+                    all_geofences.append({
+                        "id": g.get("geofenceId") or g.get("id"),
+                        "name": g.get("name"),
+                        "latitude": g.get("latitude") or g.get("lat"),
+                        "longitude": g.get("longitude") or g.get("lon"),
+                        "radius": g.get("radius"),
+                        "wifi_ssid": g.get("wifiSsid"),
+                        "kid_ids": g.get("kidIds", []),
+                    })
+                _LOGGER.debug("Loaded %d geofences from family info fallback", len(all_geofences))
             geofence_by_id = {str(g["id"]): g for g in all_geofences if g.get("id") is not None}
         except Exception as gf_err:
             _LOGGER.debug("Error fetching Garmin geofences: %s", gf_err)
@@ -485,8 +500,11 @@ class GarminJrClient:
                 kids_map: dict[str, dict[str, Any]] = {}
                 for k in kids_list:
                     k_id = str(k.get("id"))
+                    # connectId is used by the GCS tracker API as kidProfileId
+                    connect_id = k.get("connectId") or k.get("account", {}).get("connectId")
                     kids_map[k_id] = {
                         "id": k_id,
+                        "connectId": connect_id,
                         "displayName": k.get("name") or "Child",
                         "deviceId": k.get("deviceId"),
                         "hasLteDevice": k.get("hasLteDevice", True),
@@ -582,32 +600,65 @@ class GarminJrClient:
                     geofence_lon = None
                     geofence_radius = None
 
-                    trackpoints = self.fetch_trackpoints(kid_id, limit=1)
+                    # Use connectId for the GCS tracker API (not the Garmin Jr kid id)
+                    kid_connect_id = kid.get("connectId")
+                    trackpoints = self.fetch_trackpoints(kid_id, limit=50, connect_id=kid_connect_id)
                     if trackpoints:
-                        latest_pt = trackpoints[0]
+                        # Use last trackpoint for position (most recent)
+                        latest_pt = trackpoints[-1] if trackpoints else {}
                         pos = latest_pt.get("position") or {}
-                        latitude = latest_pt.get("latitude") if latest_pt.get("latitude") is not None else pos.get("latitude")
-                        longitude = latest_pt.get("longitude") if latest_pt.get("longitude") is not None else pos.get("longitude")
-                        gps_accuracy = latest_pt.get("accuracy") or latest_pt.get("accuracyMeters") or latest_pt.get("horizontalAccuracy") or 15
+
+                        # Convert from Garmin semicircles to degrees
+                        raw_lat = pos.get("lat")
+                        raw_lon = pos.get("lon")
+                        if raw_lat is not None and raw_lon is not None:
+                            latitude = raw_lat * (180.0 / 2147483648.0)
+                            longitude = raw_lon * (180.0 / 2147483648.0)
+                        else:
+                            # Fallback: try pre-converted values
+                            latitude = latest_pt.get("latitude") or pos.get("latitude")
+                            longitude = latest_pt.get("longitude") or pos.get("longitude")
+
+                        gps_accuracy = latest_pt.get("accuracy") or latest_pt.get("accuracyMeters") or 15
                         location_ts = latest_pt.get("timestamp") or latest_pt.get("dateTime") or latest_pt.get("date")
                         fix_type = latest_pt.get("fixType")
 
-                        # Check for active geofence state
-                        fp_data = latest_pt.get("familyPointData") or {}
-                        status_changes = fp_data.get("statusChanges") or []
-                        for sc in status_changes:
-                            dev_state = sc.get("deviceState")
-                            g_id = sc.get("geofenceId")
-                            if dev_state == "GeofenceEnter" or (g_id and dev_state != "GeofenceExit"):
-                                active_geofence_id = str(g_id)
-                                gf = geofence_by_id.get(active_geofence_id)
-                                if gf:
-                                    active_geofence_name = gf.get("name")
-                                    has_wifi = bool(gf.get("wifi_ssid"))
-                                    geofence_lat = gf.get("latitude")
-                                    geofence_lon = gf.get("longitude")
-                                    geofence_radius = gf.get("radius")
+                        # Extract battery from trackpoints
+                        tp_battery = latest_pt.get("batteryLevel")
+                        if tp_battery is not None and battery_level is None:
+                            battery_level = tp_battery
+                        tp_charging = latest_pt.get("isBatteryCharging")
+                        if tp_charging is True:
+                            battery_status = "CHARGING"
+
+                        # Walk ALL trackpoints in reverse to find the most recent geofence event
+                        for tp in reversed(trackpoints):
+                            fp_data = tp.get("familyPointData") or {}
+                            status_changes = fp_data.get("statusChanges") or []
+                            for sc in status_changes:
+                                dev_state = sc.get("deviceState")
+                                g_id = sc.get("geofenceId")
+                                if dev_state == "GEOFENCE_ENTER" and g_id is not None:
+                                    active_geofence_id = str(g_id)
+                                    gf = geofence_by_id.get(active_geofence_id)
+                                    if gf:
+                                        active_geofence_name = gf.get("name")
+                                        has_wifi = bool(gf.get("wifi_ssid"))
+                                        geofence_lat = gf.get("latitude")
+                                        geofence_lon = gf.get("longitude")
+                                        geofence_radius = gf.get("radius")
+                                    else:
+                                        active_geofence_name = f"Zone {active_geofence_id}"
+                                    break
+                                elif dev_state == "GEOFENCE_EXIT":
+                                    # Last event is exit — child is outside all zones
+                                    active_geofence_name = "Outside"
+                                    break
+                            if active_geofence_name is not None:
                                 break
+
+                        if active_geofence_name is None:
+                            active_geofence_name = "Outside"
 
                     # Match latest message for this child
                     last_msg_text = None
