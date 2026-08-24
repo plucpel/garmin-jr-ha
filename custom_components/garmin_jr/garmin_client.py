@@ -49,6 +49,8 @@ class GarminJrClient:
         self.client = Client()
         self._family_id: int | None = None
         self._family_name: str | None = None
+        self._diauth_token: str | None = None
+        self._diauth_expires_at: float | None = None
         self._it_token: str | None = None
         self._it_refresh_token: str | None = None
         self._it_expires_at: float | None = None
@@ -140,8 +142,41 @@ class GarminJrClient:
 
         return None
 
+    def _ensure_diauth_token(self) -> str | None:
+        """Ensure a valid diauth Garmin Jr token exists."""
+        now = time.time()
+        if self._diauth_token and self._diauth_expires_at and (now + 300) < self._diauth_expires_at:
+            return self._diauth_token
+
+        di_token = self._extract_di_token()
+        if not di_token:
+            return None
+
+        try:
+            url = "https://diauth.garmin.com/di-oauth2-service/oauth/token"
+            data = {
+                "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+                "subject_token": di_token,
+                "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
+                "client_id": "VIVOFIT_JR_ANDROID",
+            }
+            resp = requests.post(url, data=data, timeout=15)
+            if resp.status_code == 200:
+                res_data = resp.json()
+                self._diauth_token = res_data.get("access_token")
+                expires_in = res_data.get("expires_in", 21600)
+                self._diauth_expires_at = now + expires_in
+                _LOGGER.debug("Exchanged DI token for Garmin Jr diauth token successfully")
+                return self._diauth_token
+            else:
+                _LOGGER.warning("diauth token exchange returned %s: %s", resp.status_code, resp.text)
+        except Exception as err:
+            _LOGGER.warning("Exception during diauth token exchange: %s", err)
+
+        return None
+
     def _ensure_it_token(self) -> None:
-        """Ensure a valid IT token exists, exchanging DI token or refreshing if needed."""
+        """Ensure a valid IT token exists, exchanging via connectToIT or refreshing."""
         now = time.time()
         if self._it_token and self._it_expires_at and (now + 300) < self._it_expires_at:
             return
@@ -149,22 +184,22 @@ class GarminJrClient:
         # 1. Try refresh token if available
         if self._it_refresh_token:
             try:
-                url = f"{SERVICES_BASE_URL}/api/oauth/token"
+                url = f"{SERVICES_BASE_URL}/oauthTokenExchangeService/refreshToken"
                 headers = {
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "User-Agent": "GarminJr/5.23.0 (Android)",
+                    "Content-Type": "application/json",
+                    "User-Agent": "GarminJr/2.0.0 (Android)",
+                    "X-garmin-client-id": "VIVOFIT_JR_ANDROID",
                 }
                 data = {
-                    "grant_type": "refresh_token",
-                    "client_id": "VIVOFIT_JR_ANDROID",
-                    "refresh_token": self._it_refresh_token,
+                    "refreshToken": self._it_refresh_token,
+                    "itOAuthClientId": "VIVOFIT_JR_ANDROID",
                 }
-                resp = requests.post(url, headers=headers, data=data, timeout=15)
+                resp = requests.post(url, headers=headers, json=data, timeout=15)
                 if resp.status_code == 200:
                     res_data = resp.json()
-                    self._it_token = res_data.get("access_token")
-                    self._it_refresh_token = res_data.get("refresh_token", self._it_refresh_token)
-                    expires_in = res_data.get("expires_in", 3600)
+                    self._it_token = res_data.get("accessToken") or res_data.get("access_token")
+                    self._it_refresh_token = res_data.get("refreshToken") or res_data.get("refresh_token", self._it_refresh_token)
+                    expires_in = res_data.get("expiresIn") or res_data.get("expires_in", 7776000)
                     self._it_expires_at = now + expires_in
                     _LOGGER.debug("Refreshed Garmin IT OAuth2 token successfully")
                     return
@@ -173,42 +208,71 @@ class GarminJrClient:
             except Exception as err:
                 _LOGGER.debug("Exception during IT token refresh: %s", err)
 
-        # 2. Exchange DI token for Garmin Jr token via diauth
-        di_token = self._extract_di_token()
-        if di_token:
-            try:
-                url = "https://diauth.garmin.com/di-oauth2-service/oauth/token"
-                data = {
-                    "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
-                    "subject_token": di_token,
-                    "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
-                    "client_id": "VIVOFIT_JR_ANDROID",
-                }
-                resp = requests.post(url, data=data, timeout=15)
-                if resp.status_code == 200:
-                    res_data = resp.json()
-                    self._it_token = res_data.get("access_token")
-                    self._it_refresh_token = res_data.get("refresh_token", self._it_refresh_token)
-                    expires_in = res_data.get("expires_in", 21600)
-                    self._it_expires_at = now + expires_in
-                    _LOGGER.debug("Exchanged DI token for Garmin Jr OAuth2 token successfully")
-                    return
-                else:
-                    _LOGGER.warning("diauth token exchange returned %s: %s", resp.status_code, resp.text)
-            except Exception as err:
-                _LOGGER.warning("Exception during diauth token exchange: %s", err)
+        # 2. Exchange via connectToIT using guardian oauthToken from family/info
+        jr_token = self._ensure_diauth_token()
+        if not jr_token:
+            return
+
+        try:
+            fam_headers = {
+                "Authorization": f"Bearer {jr_token}",
+                "User-Agent": "GarminJr/2.0.0 (Android)",
+                "Accept": "application/json",
+            }
+            fam_resp = requests.get(f"{VIVOKID_BASE_URL}/v3/family/info", headers=fam_headers, timeout=10)
+            if fam_resp.status_code == 200:
+                fam_data = fam_resp.json()
+                families = fam_data.get("families", [])
+                if families:
+                    guardians = families[0].get("guardians", [])
+                    admin_guardians = [g for g in guardians if g.get("role") == "ADMIN"]
+                    target_guardian = admin_guardians[0] if admin_guardians else (guardians[0] if guardians else {})
+                    guardian_token = target_guardian.get("account", {}).get("oauthToken")
+
+                    if guardian_token:
+                        ex_url = f"{SERVICES_BASE_URL}/oauthTokenExchangeService/connectToIT"
+                        ex_body = {
+                            "connectAccessToken": guardian_token,
+                            "itOAuthClientId": "VIVOFIT_JR_ANDROID",
+                        }
+                        ex_headers = {
+                            "Content-Type": "application/json",
+                            "User-Agent": "GarminJr/2.0.0 (Android)",
+                            "X-garmin-client-id": "VIVOFIT_JR_ANDROID",
+                        }
+                        ex_res = requests.post(ex_url, json=ex_body, headers=ex_headers, timeout=15)
+                        if ex_res.status_code == 200:
+                            ex_data = ex_res.json()
+                            self._it_token = ex_data.get("accessToken") or ex_data.get("access_token")
+                            self._it_refresh_token = ex_data.get("refreshToken") or ex_data.get("refresh_token")
+                            expires_in = ex_data.get("expiresIn") or ex_data.get("expires_in", 7776000)
+                            self._it_expires_at = now + expires_in
+                            _LOGGER.debug("Obtained Garmin IT OAuth2 token via connectToIT successfully")
+                            return
+                        else:
+                            _LOGGER.debug("connectToIT returned %s: %s", ex_res.status_code, ex_res.text)
+        except Exception as err:
+            _LOGGER.debug("Exception during connectToIT token exchange: %s", err)
+
+    def _get_diauth_headers(self) -> dict[str, str]:
+        """Get headers for Garmin Jr / Vivokid API endpoints."""
+        token = self._ensure_diauth_token() or self._extract_di_token() or ""
+        return {
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "GarminJr/2.0.0 (Android)",
+            "Accept": "application/json",
+        }
 
     def _get_it_headers(self) -> dict[str, str]:
         """Get headers for Garmin LTE / GCS API endpoints."""
         self._ensure_it_token()
-        token = self._it_token or self._extract_di_token() or ""
-        headers = {
+        token = self._it_token or self._ensure_diauth_token() or self._extract_di_token() or ""
+        return {
             "Authorization": f"Bearer {token}",
-            "User-Agent": "GarminJr/5.23.0 (Android)",
+            "User-Agent": "GarminJr/2.0.0 (Android)",
             "Accept": "application/json",
             "X-garmin-client-id": "VIVOFIT_JR_ANDROID",
         }
-        return headers
 
     def login_sync(self, prompt_mfa: Any = None) -> tuple[str | None, Any]:
         """Perform synchronous login using Garmin credentials."""
@@ -243,7 +307,7 @@ class GarminJrClient:
             if self.client._token_expires_soon():
                 self.client._refresh_session()
 
-            headers = self._get_it_headers()
+            headers = self._get_diauth_headers()
             resp = requests.get(
                 f"{VIVOKID_BASE_URL}/v3/family/info", headers=headers, timeout=10
             )
@@ -276,7 +340,7 @@ class GarminJrClient:
     def fetch_geofences(self, kid_profile_id: str | int | None = None) -> list[dict[str, Any]]:
         """Fetch all configured Garmin Safe Zones / Geofences from Vivokid API."""
         try:
-            headers = self._get_it_headers()
+            headers = self._get_diauth_headers()
             url = f"{VIVOKID_BASE_URL}/geofence/all"
             resp = requests.get(url, headers=headers, timeout=10)
             if resp.status_code == 200:
@@ -369,7 +433,7 @@ class GarminJrClient:
                 _LOGGER.warning("Token refresh warning: %s", err)
 
         results: dict[str, dict[str, Any]] = {}
-        headers = self._get_it_headers()
+        diauth_headers = self._get_diauth_headers()
         today = datetime.date.today().isoformat()
 
         # 1. Fetch Garmin Jr Family Info
@@ -378,7 +442,7 @@ class GarminJrClient:
         kids_list: list[dict[str, Any]] = []
 
         try:
-            fam_resp = requests.get(f"{VIVOKID_BASE_URL}/v3/family/info", headers=headers, timeout=10)
+            fam_resp = requests.get(f"{VIVOKID_BASE_URL}/v3/family/info", headers=diauth_headers, timeout=10)
             if fam_resp.status_code == 200:
                 fam_data = fam_resp.json()
                 families = fam_data.get("families", [])
@@ -430,7 +494,7 @@ class GarminJrClient:
                     }
 
                 lb_url = f"{VIVOKID_BASE_URL}/v2/leaderboard/daily/{family_id}/{today}"
-                lb_resp = requests.get(lb_url, headers=headers, timeout=10)
+                lb_resp = requests.get(lb_url, headers=diauth_headers, timeout=10)
                 if lb_resp.status_code == 200:
                     for kid in lb_resp.json().get("kidStepsData", []):
                         k_id = str(kid.get("id"))
@@ -457,7 +521,7 @@ class GarminJrClient:
                     active_mins = 0
                     try:
                         sum_url = f"{VIVOKID_BASE_URL}/v2/activity/summary/kid/{kid_id}/{today}"
-                        sum_resp = requests.get(sum_url, headers=headers, timeout=10)
+                        sum_resp = requests.get(sum_url, headers=diauth_headers, timeout=10)
                         if sum_resp.status_code == 200:
                             sum_data = sum_resp.json()
                             step_goal = sum_data.get("stepsGoal") or step_goal
@@ -480,7 +544,7 @@ class GarminJrClient:
                     active_mins_record = None
                     try:
                         pr_url = f"{VIVOKID_BASE_URL}/v2/activity/personalrecords/{kid_id}"
-                        pr_resp = requests.get(pr_url, headers=headers, timeout=10)
+                        pr_resp = requests.get(pr_url, headers=diauth_headers, timeout=10)
                         if pr_resp.status_code == 200:
                             pr_data = pr_resp.json()
                             steps_record = pr_data.get("stepsRecord") or steps_record
@@ -622,11 +686,25 @@ class GarminJrClient:
                         except Exception:
                             pass
 
+                    # Match to existing child by deviceId or childId
+                    matched_child = None
                     if child_id in results:
+                        matched_child = child_id
+                    else:
+                        for cid, cdata in results.items():
+                            if cdata.get("device_id") == dev_id or cdata.get("serial_number") == dev_id:
+                                matched_child = cid
+                                break
+
+                    if matched_child:
                         if dev_battery_level is not None:
-                            results[child_id]["battery_level"] = dev_battery_level
+                            results[matched_child]["battery_level"] = dev_battery_level
                         if dev_battery_status:
-                            results[child_id]["battery_status"] = dev_battery_status
+                            results[matched_child]["battery_status"] = dev_battery_status
+                        continue
+
+                    # If family kids were already discovered, do not add unrelated adult watches as child entities
+                    if results:
                         continue
 
                     results[child_id] = {
