@@ -198,6 +198,15 @@ class GarminJrOptionsFlowHandler(config_entries.OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Manage the options."""
+        # 1. Discover Garmin Safe Zones (geofences) from coordinator data
+        coordinator = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id) if self.hass else None
+        geofences: list[dict[str, Any]] = []
+        if coordinator and coordinator.data:
+            for child_id, child_data in coordinator.data.items():
+                for gf in child_data.get("geofences", []):
+                    if gf.get("id") and gf not in geofences:
+                        geofences.append(gf)
+
         if user_input is not None:
             scan_interval = user_input.get(
                 CONF_SCAN_INTERVAL,
@@ -208,11 +217,29 @@ class GarminJrOptionsFlowHandler(config_entries.OptionsFlow):
             )
 
             # Collect zone mapping selections
-            zone_mapping: dict[str, str] = {}
+            zone_mapping: dict[str, str] = dict(self.config_entry.options.get(CONF_ZONE_MAPPING, {}))
             for key, val in user_input.items():
-                if key.startswith("zone_") and val:
-                    geofence_id = key.replace("zone_", "")
-                    zone_mapping[geofence_id] = str(val)
+                if key == CONF_SCAN_INTERVAL or not val:
+                    continue
+
+                matched_id = None
+                if "(" in key and ")" in key:
+                    inside_parens = key.split("(")[1].split(")")[0].replace("ID:", "").strip()
+                    if inside_parens.isdigit():
+                        matched_id = inside_parens
+                if not matched_id and key.startswith("zone_"):
+                    suffix = key.replace("zone_", "").split("_")[0].strip()
+                    if suffix.isdigit():
+                        matched_id = suffix
+                if not matched_id:
+                    for gf in geofences:
+                        gid = str(gf.get("id"))
+                        if gid in key or key == gf.get("name"):
+                            matched_id = gid
+                            break
+
+                if matched_id:
+                    zone_mapping[matched_id] = str(val)
 
             return self.async_create_entry(
                 title="",
@@ -229,7 +256,7 @@ class GarminJrOptionsFlowHandler(config_entries.OptionsFlow):
 
         saved_mapping = self.config_entry.options.get(CONF_ZONE_MAPPING, {})
 
-        # 1. Fetch available Home Assistant zones
+        # 2. Fetch available Home Assistant zones
         zone_options = [
             selector.SelectOptionDict(value="auto", label="Auto-Detect (Match by Name / Proximity)"),
             selector.SelectOptionDict(value="none", label="None (Use Raw GPS / Don't Match)"),
@@ -241,15 +268,6 @@ class GarminJrOptionsFlowHandler(config_entries.OptionsFlow):
                 z_state = self.hass.states.get(z_id)
                 friendly = z_state.attributes.get("friendly_name") if z_state else z_id
                 zone_options.append(selector.SelectOptionDict(value=z_id, label=f"{friendly} ({z_id})"))
-
-        # 2. Discover Garmin Safe Zones (geofences) from coordinator data
-        coordinator = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id) if self.hass else None
-        geofences: list[dict[str, Any]] = []
-        if coordinator and coordinator.data:
-            for child_id, child_data in coordinator.data.items():
-                for gf in child_data.get("geofences", []):
-                    if gf.get("id") and gf not in geofences:
-                        geofences.append(gf)
 
         schema_dict: dict[Any, Any] = {
             vol.Required(
@@ -266,13 +284,13 @@ class GarminJrOptionsFlowHandler(config_entries.OptionsFlow):
             ),
         }
 
-        # 3. Add dynamic selectors for each discovered Garmin Safe Zone
+        # 3. Add dynamic selectors for each discovered Garmin Safe Zone with human-readable names
         for gf in geofences:
             gf_id = str(gf.get("id"))
             gf_name = gf.get("name") or f"Geofence {gf_id}"
             wifi_ssid = gf.get("wifi_ssid")
-            wifi_str = f" [Wi-Fi: {wifi_ssid}]" if wifi_ssid else " [LTE Only]"
-            field_key = f"zone_{gf_id}"
+            wifi_str = f" [Wi-Fi: {wifi_ssid}]" if wifi_ssid else ""
+            field_key = f"{gf_name} ({gf_id}){wifi_str}"
             default_val = saved_mapping.get(gf_id, "auto")
 
             schema_dict[vol.Optional(field_key, default=default_val)] = selector.SelectSelector(
