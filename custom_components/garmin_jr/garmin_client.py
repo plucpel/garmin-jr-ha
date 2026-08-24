@@ -173,35 +173,30 @@ class GarminJrClient:
             except Exception as err:
                 _LOGGER.debug("Exception during IT token refresh: %s", err)
 
-        # 2. Exchange DI token for IT token
+        # 2. Exchange DI token for Garmin Jr token via diauth
         di_token = self._extract_di_token()
         if di_token:
             try:
-                url = f"{SERVICES_BASE_URL}/oauthTokenExchangeService/connectToIT"
-                headers = {
-                    "Content-Type": "application/json",
-                    "User-Agent": "GarminJr/5.23.0 (Android)",
-                    "Accept": "application/json",
-                    "X-garmin-client-id": "VIVOFIT_JR_ANDROID",
-                    "Garmin-Client-Id": "VIVOFIT_JR_ANDROID",
+                url = "https://diauth.garmin.com/di-oauth2-service/oauth/token"
+                data = {
+                    "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+                    "subject_token": di_token,
+                    "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
+                    "client_id": "VIVOFIT_JR_ANDROID",
                 }
-                payload = {
-                    "connectAccessToken": di_token,
-                    "itOAuthClientId": "VIVOFIT_JR_ANDROID",
-                }
-                resp = requests.post(url, headers=headers, json=payload, timeout=15)
+                resp = requests.post(url, data=data, timeout=15)
                 if resp.status_code == 200:
                     res_data = resp.json()
-                    self._it_token = res_data.get("accessToken") or res_data.get("token")
-                    self._it_refresh_token = res_data.get("refreshToken", self._it_refresh_token)
-                    expires_in = res_data.get("expiresIn", 3600)
+                    self._it_token = res_data.get("access_token")
+                    self._it_refresh_token = res_data.get("refresh_token", self._it_refresh_token)
+                    expires_in = res_data.get("expires_in", 21600)
                     self._it_expires_at = now + expires_in
-                    _LOGGER.debug("Exchanged DI token for Garmin IT OAuth2 token successfully")
+                    _LOGGER.debug("Exchanged DI token for Garmin Jr OAuth2 token successfully")
                     return
                 else:
-                    _LOGGER.warning("DI to IT token exchange returned %s: %s", resp.status_code, resp.text)
+                    _LOGGER.warning("diauth token exchange returned %s: %s", resp.status_code, resp.text)
             except Exception as err:
-                _LOGGER.warning("Exception during DI to IT token exchange: %s", err)
+                _LOGGER.warning("Exception during diauth token exchange: %s", err)
 
     def _get_it_headers(self) -> dict[str, str]:
         """Get headers for Garmin LTE / GCS API endpoints."""
@@ -248,9 +243,9 @@ class GarminJrClient:
             if self.client._token_expires_soon():
                 self.client._refresh_session()
 
-            headers = self.client.get_api_headers()
-            resp = self.client._api_session.get(
-                f"{VIVOKID_BASE_URL}/v2/family/info", headers=headers, timeout=10
+            headers = self._get_it_headers()
+            resp = requests.get(
+                f"{VIVOKID_BASE_URL}/v3/family/info", headers=headers, timeout=10
             )
             if resp.status_code == 200:
                 return True
@@ -279,13 +274,10 @@ class GarminJrClient:
         return []
 
     def fetch_geofences(self, kid_profile_id: str | int | None = None) -> list[dict[str, Any]]:
-        """Fetch all configured Garmin Safe Zones / Geofences from GCS API."""
+        """Fetch all configured Garmin Safe Zones / Geofences from Vivokid API."""
         try:
             headers = self._get_it_headers()
-            if kid_profile_id:
-                url = f"{GCS_API_BASE_URL}/geofence/kid/{kid_profile_id}"
-            else:
-                url = f"{GCS_API_BASE_URL}/geofence/all"
+            url = f"{VIVOKID_BASE_URL}/geofence/all"
             resp = requests.get(url, headers=headers, timeout=10)
             if resp.status_code == 200:
                 data = resp.json()
@@ -293,7 +285,7 @@ class GarminJrClient:
                     geofences: list[dict[str, Any]] = []
                     for g in data:
                         geofences.append({
-                            "id": g.get("id"),
+                            "id": g.get("geofenceId") or g.get("id"),
                             "name": g.get("name"),
                             "latitude": g.get("latitude"),
                             "longitude": g.get("longitude"),
@@ -377,21 +369,29 @@ class GarminJrClient:
                 _LOGGER.warning("Token refresh warning: %s", err)
 
         results: dict[str, dict[str, Any]] = {}
-        headers = self.client.get_api_headers()
-        sess = self.client._api_session
+        headers = self._get_it_headers()
         today = datetime.date.today().isoformat()
 
         # 1. Fetch Garmin Jr Family Info
         family_id = self._family_id
         family_name = self._family_name
+        kids_list: list[dict[str, Any]] = []
 
         try:
-            fam_resp = sess.get(f"{VIVOKID_BASE_URL}/v2/family/info", headers=headers, timeout=10)
+            fam_resp = requests.get(f"{VIVOKID_BASE_URL}/v3/family/info", headers=headers, timeout=10)
             if fam_resp.status_code == 200:
                 fam_data = fam_resp.json()
-                family = fam_data.get("family", {})
-                family_id = family.get("familyId")
-                family_name = family.get("name")
+                families = fam_data.get("families", [])
+                if families:
+                    family = families[0]
+                    family_id = family.get("familyId")
+                    family_name = family.get("name")
+                    kids_list = family.get("kids", [])
+                elif fam_data.get("family"):
+                    family = fam_data.get("family", {})
+                    family_id = family.get("familyId")
+                    family_name = family.get("name")
+                    kids_list = family.get("kids", [])
                 self._family_id = family_id
                 self._family_name = family_name
                 _LOGGER.debug("Discovered Garmin Jr Family: %s (ID: %s)", family_name, family_id)
@@ -417,165 +417,182 @@ class GarminJrClient:
         # 4. Fetch Kids from Garmin Jr Leaderboard & Activity Summaries
         if family_id:
             try:
+                # Merge kids from family info and leaderboard
+                kids_map: dict[str, dict[str, Any]] = {}
+                for k in kids_list:
+                    k_id = str(k.get("id"))
+                    kids_map[k_id] = {
+                        "id": k_id,
+                        "displayName": k.get("name") or "Child",
+                        "deviceId": k.get("deviceId"),
+                        "hasLteDevice": k.get("hasLteDevice", True),
+                        "totalPoints": k.get("totalPoints"),
+                    }
+
                 lb_url = f"{VIVOKID_BASE_URL}/v2/leaderboard/daily/{family_id}/{today}"
-                lb_resp = sess.get(lb_url, headers=headers, timeout=10)
+                lb_resp = requests.get(lb_url, headers=headers, timeout=10)
                 if lb_resp.status_code == 200:
-                    kids_data = lb_resp.json().get("kidStepsData", [])
-                    for kid in kids_data:
-                        kid_id = str(kid.get("id"))
-                        kid_name = kid.get("displayName") or "Child"
-                        live_steps = kid.get("steps") or 0
-                        last_sync = kid.get("lastSyncDate")
+                    for kid in lb_resp.json().get("kidStepsData", []):
+                        k_id = str(kid.get("id"))
+                        if k_id in kids_map:
+                            kids_map[k_id].update(kid)
+                        else:
+                            kids_map[k_id] = kid
 
-                        # Filter geofences applicable to this kid
-                        kid_int = int(kid_id) if kid_id.isdigit() else None
-                        kid_geofences = [
-                            g for g in all_geofences
-                            if not g.get("kid_ids") or (kid_int is not None and kid_int in g.get("kid_ids", []))
-                        ]
+                for kid_id, kid in kids_map.items():
+                    kid_name = kid.get("displayName") or kid.get("name") or "Child"
+                    live_steps = kid.get("steps") or 0
+                    last_sync = kid.get("lastSyncDate")
 
-                        # Fetch Daily Step Summary
-                        step_goal = 7500
-                        steps_record = None
-                        active_mins = None
-                        try:
-                            sum_url = f"{VIVOKID_BASE_URL}/v2/activity/summary/kid/{kid_id}/{today}"
-                            sum_resp = sess.get(sum_url, headers=headers, timeout=10)
-                            if sum_resp.status_code == 200:
-                                sum_data = sum_resp.json()
-                                step_goal = sum_data.get("stepsGoal") or step_goal
-                                steps_record = sum_data.get("stepsRecord")
-                                active_mins = (
-                                    sum_data.get("activeMinutes")
-                                    or sum_data.get("activeMinute")
-                                    or ((sum_data.get("walkingMinutes") or 0) + (sum_data.get("runningMinutes") or 0))
-                                )
-                                if sum_data.get("lastSyncDate"):
-                                    ts_ms = sum_data.get("lastSyncDate")
-                                    last_sync = datetime.datetime.fromtimestamp(
-                                        ts_ms / 1000.0, tz=datetime.timezone.utc
-                                    ).isoformat()
-                        except Exception as sum_err:
-                            _LOGGER.debug("Could not fetch kid summary for %s: %s", kid_id, sum_err)
+                    # Filter geofences applicable to this kid
+                    kid_int = int(kid_id) if kid_id.isdigit() else None
+                    kid_geofences = [
+                        g for g in all_geofences
+                        if not g.get("kid_ids") or (kid_int is not None and kid_int in g.get("kid_ids", []))
+                    ]
 
-                        # Fetch Personal Records
-                        active_mins_record = None
-                        try:
-                            pr_url = f"{VIVOKID_BASE_URL}/v2/activity/personalrecords/{kid_id}"
-                            pr_resp = sess.get(pr_url, headers=headers, timeout=10)
-                            if pr_resp.status_code == 200:
-                                pr_data = pr_resp.json()
-                                steps_record = pr_data.get("stepsRecord") or steps_record
-                                active_mins_record = pr_data.get("activeMinuteRecord")
-                        except Exception as pr_err:
-                            _LOGGER.debug("Could not fetch kid personal records for %s: %s", kid_id, pr_err)
+                    # Fetch Daily Step Summary
+                    step_goal = 7500
+                    steps_record = None
+                    active_mins = None
+                    try:
+                        sum_url = f"{VIVOKID_BASE_URL}/v2/activity/summary/kid/{kid_id}/{today}"
+                        sum_resp = requests.get(sum_url, headers=headers, timeout=10)
+                        if sum_resp.status_code == 200:
+                            sum_data = sum_resp.json()
+                            step_goal = sum_data.get("stepsGoal") or step_goal
+                            steps_record = sum_data.get("stepsRecord")
+                            active_mins = (
+                                sum_data.get("activeMinutes")
+                                or sum_data.get("activeMinute")
+                                or ((sum_data.get("walkingMinutes") or 0) + (sum_data.get("runningMinutes") or 0))
+                            )
+                            if sum_data.get("lastSyncDate"):
+                                ts_ms = sum_data.get("lastSyncDate")
+                                last_sync = datetime.datetime.fromtimestamp(
+                                    ts_ms / 1000.0, tz=datetime.timezone.utc
+                                ).isoformat()
+                    except Exception as sum_err:
+                        _LOGGER.debug("Could not fetch kid summary for %s: %s", kid_id, sum_err)
 
-                        # Query Device Info & Battery
-                        battery_level = None
-                        battery_status = "NORMAL"
-                        try:
-                            dinfo = self.client.connectapi(f"/wellness-service/wellness/deviceInfo/{kid_id}")
-                            if isinstance(dinfo, dict):
-                                if dinfo.get("batteryLevel") is not None:
-                                    battery_level = dinfo.get("batteryLevel")
-                                if dinfo.get("batteryStatus"):
-                                    battery_status = str(dinfo.get("batteryStatus")).upper()
-                                if dinfo.get("lastSyncDate") and not last_sync:
-                                    last_sync = datetime.datetime.fromtimestamp(
-                                        dinfo.get("lastSyncDate") / 1000.0, tz=datetime.timezone.utc
-                                    ).isoformat()
-                        except Exception as d_err:
-                            _LOGGER.debug("Could not query device info for kid %s: %s", kid_id, d_err)
+                    # Fetch Personal Records
+                    active_mins_record = None
+                    try:
+                        pr_url = f"{VIVOKID_BASE_URL}/v2/activity/personalrecords/{kid_id}"
+                        pr_resp = requests.get(pr_url, headers=headers, timeout=10)
+                        if pr_resp.status_code == 200:
+                            pr_data = pr_resp.json()
+                            steps_record = pr_data.get("stepsRecord") or steps_record
+                            active_mins_record = pr_data.get("activeMinuteRecord")
+                    except Exception as pr_err:
+                        _LOGGER.debug("Could not fetch kid personal records for %s: %s", kid_id, pr_err)
 
-                        # Fetch Live GPS Trackpoints & Geofence Status
-                        latitude = None
-                        longitude = None
-                        gps_accuracy = 15
-                        location_ts = None
-                        fix_type = None
-                        active_geofence_id = None
-                        active_geofence_name = None
-                        has_wifi = False
-                        geofence_lat = None
-                        geofence_lon = None
-                        geofence_radius = None
+                    # Query Device Info & Battery
+                    battery_level = None
+                    battery_status = "NORMAL"
+                    try:
+                        dinfo = self.client.connectapi(f"/wellness-service/wellness/deviceInfo/{kid_id}")
+                        if isinstance(dinfo, dict):
+                            if dinfo.get("batteryLevel") is not None:
+                                battery_level = dinfo.get("batteryLevel")
+                            if dinfo.get("batteryStatus"):
+                                battery_status = str(dinfo.get("batteryStatus")).upper()
+                            if dinfo.get("lastSyncDate") and not last_sync:
+                                last_sync = datetime.datetime.fromtimestamp(
+                                    dinfo.get("lastSyncDate") / 1000.0, tz=datetime.timezone.utc
+                                ).isoformat()
+                    except Exception as d_err:
+                        _LOGGER.debug("Could not query device info for kid %s: %s", kid_id, d_err)
 
-                        trackpoints = self.fetch_trackpoints(kid_id, limit=1)
-                        if trackpoints:
-                            latest_pt = trackpoints[0]
-                            pos = latest_pt.get("position") or {}
-                            latitude = latest_pt.get("latitude") if latest_pt.get("latitude") is not None else pos.get("latitude")
-                            longitude = latest_pt.get("longitude") if latest_pt.get("longitude") is not None else pos.get("longitude")
-                            gps_accuracy = latest_pt.get("accuracy") or latest_pt.get("accuracyMeters") or latest_pt.get("horizontalAccuracy") or 15
-                            location_ts = latest_pt.get("timestamp") or latest_pt.get("dateTime") or latest_pt.get("date")
-                            fix_type = latest_pt.get("fixType")
+                    # Fetch Live GPS Trackpoints & Geofence Status
+                    latitude = None
+                    longitude = None
+                    gps_accuracy = 15
+                    location_ts = None
+                    fix_type = None
+                    active_geofence_id = None
+                    active_geofence_name = None
+                    has_wifi = False
+                    geofence_lat = None
+                    geofence_lon = None
+                    geofence_radius = None
 
-                            # Check for active geofence state
-                            fp_data = latest_pt.get("familyPointData") or {}
-                            status_changes = fp_data.get("statusChanges") or []
-                            for sc in status_changes:
-                                dev_state = sc.get("deviceState")
-                                g_id = sc.get("geofenceId")
-                                if dev_state == "GeofenceEnter" or (g_id and dev_state != "GeofenceExit"):
-                                    active_geofence_id = str(g_id)
-                                    gf = geofence_by_id.get(active_geofence_id)
-                                    if gf:
-                                        active_geofence_name = gf.get("name")
-                                        has_wifi = bool(gf.get("wifi_ssid"))
-                                        geofence_lat = gf.get("latitude")
-                                        geofence_lon = gf.get("longitude")
-                                        geofence_radius = gf.get("radius")
-                                    break
+                    trackpoints = self.fetch_trackpoints(kid_id, limit=1)
+                    if trackpoints:
+                        latest_pt = trackpoints[0]
+                        pos = latest_pt.get("position") or {}
+                        latitude = latest_pt.get("latitude") if latest_pt.get("latitude") is not None else pos.get("latitude")
+                        longitude = latest_pt.get("longitude") if latest_pt.get("longitude") is not None else pos.get("longitude")
+                        gps_accuracy = latest_pt.get("accuracy") or latest_pt.get("accuracyMeters") or latest_pt.get("horizontalAccuracy") or 15
+                        location_ts = latest_pt.get("timestamp") or latest_pt.get("dateTime") or latest_pt.get("date")
+                        fix_type = latest_pt.get("fixType")
 
-                        # Match latest message for this child
-                        last_msg_text = None
-                        last_msg_time = None
-                        last_msg_sender = None
-                        last_msg_media = None
-                        for msg in recent_messages:
-                            to_pk = str(msg.get("toUserProfilePk", ""))
-                            from_pk = str(msg.get("fromUserProfilePk", ""))
-                            if kid_id in (to_pk, from_pk):
-                                last_msg_text = msg.get("messageText") or msg.get("text") or msg.get("mediaType", "Message")
-                                last_msg_time = msg.get("createdTimestamp") or msg.get("timestamp")
-                                last_msg_sender = msg.get("senderDisplayName") or msg.get("sender") or ("Child" if from_pk == kid_id else "Guardian")
-                                last_msg_media = msg.get("mediaType", "Text")
+                        # Check for active geofence state
+                        fp_data = latest_pt.get("familyPointData") or {}
+                        status_changes = fp_data.get("statusChanges") or []
+                        for sc in status_changes:
+                            dev_state = sc.get("deviceState")
+                            g_id = sc.get("geofenceId")
+                            if dev_state == "GeofenceEnter" or (g_id and dev_state != "GeofenceExit"):
+                                active_geofence_id = str(g_id)
+                                gf = geofence_by_id.get(active_geofence_id)
+                                if gf:
+                                    active_geofence_name = gf.get("name")
+                                    has_wifi = bool(gf.get("wifi_ssid"))
+                                    geofence_lat = gf.get("latitude")
+                                    geofence_lon = gf.get("longitude")
+                                    geofence_radius = gf.get("radius")
                                 break
 
-                        results[kid_id] = {
-                            "child_id": kid_id,
-                            "child_name": kid_name,
-                            "device_id": kid_id,
-                            "device_name": f"{kid_name}'s Bounce",
-                            "model": "Garmin Bounce",
-                            "latitude": latitude,
-                            "longitude": longitude,
-                            "gps_accuracy": gps_accuracy,
-                            "location_timestamp": location_ts or time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                            "battery_level": battery_level,
-                            "battery_status": battery_status,
-                            "steps": live_steps,
-                            "daily_step_goal": step_goal,
-                            "steps_record": steps_record,
-                            "active_minutes": active_mins,
-                            "active_minutes_record": active_mins_record,
-                            "last_sync": last_sync or time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                            "family_id": family_id,
-                            "family_name": family_name,
-                            "last_message": last_msg_text,
-                            "last_message_time": last_msg_time,
-                            "last_message_sender": last_msg_sender,
-                            "last_message_media": last_msg_media,
-                            "garmin_safe_zone": active_geofence_name,
-                            "garmin_geofence_id": active_geofence_id,
-                            "fix_type": fix_type,
-                            "has_wifi": has_wifi,
-                            "geofence_latitude": geofence_lat,
-                            "geofence_longitude": geofence_lon,
-                            "geofence_radius": geofence_radius,
-                            "geofences": kid_geofences,
-                            "new_messages": recent_messages,
-                        }
+                    # Match latest message for this child
+                    last_msg_text = None
+                    last_msg_time = None
+                    last_msg_sender = None
+                    last_msg_media = None
+                    for msg in recent_messages:
+                        to_pk = str(msg.get("toUserProfilePk", ""))
+                        from_pk = str(msg.get("fromUserProfilePk", ""))
+                        if kid_id in (to_pk, from_pk):
+                            last_msg_text = msg.get("messageText") or msg.get("text") or msg.get("mediaType", "Message")
+                            last_msg_time = msg.get("createdTimestamp") or msg.get("timestamp")
+                            last_msg_sender = msg.get("senderDisplayName") or msg.get("sender") or ("Child" if from_pk == kid_id else "Guardian")
+                            last_msg_media = msg.get("mediaType", "Text")
+                            break
+
+                    results[kid_id] = {
+                        "child_id": kid_id,
+                        "child_name": kid_name,
+                        "device_id": kid_id,
+                        "device_name": f"{kid_name}'s Bounce",
+                        "model": "Garmin Bounce",
+                        "latitude": latitude,
+                        "longitude": longitude,
+                        "gps_accuracy": gps_accuracy,
+                        "location_timestamp": location_ts or time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "battery_level": battery_level,
+                        "battery_status": battery_status,
+                        "steps": live_steps,
+                        "daily_step_goal": step_goal,
+                        "steps_record": steps_record,
+                        "active_minutes": active_mins,
+                        "active_minutes_record": active_mins_record,
+                        "last_sync": last_sync or time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "family_id": family_id,
+                        "family_name": family_name,
+                        "last_message": last_msg_text,
+                        "last_message_time": last_msg_time,
+                        "last_message_sender": last_msg_sender,
+                        "last_message_media": last_msg_media,
+                        "garmin_safe_zone": active_geofence_name,
+                        "garmin_geofence_id": active_geofence_id,
+                        "fix_type": fix_type,
+                        "has_wifi": has_wifi,
+                        "geofence_latitude": geofence_lat,
+                        "geofence_longitude": geofence_lon,
+                        "geofence_radius": geofence_radius,
+                        "geofences": kid_geofences,
+                        "new_messages": recent_messages,
+                    }
             except Exception as lb_err:
                 _LOGGER.warning("Error fetching kid leaderboard for family %s: %s", family_id, lb_err)
 

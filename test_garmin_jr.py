@@ -5,7 +5,7 @@ import py_compile
 import sys
 from typing import Any
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Verify compilation of all Python files in the component
 print("Checking Python syntax compilation...")
@@ -148,8 +148,13 @@ class TestGarminJrClient(unittest.TestCase):
         self.assertEqual(dumped["it_token"], "mock_it_token")
         self.assertEqual(dumped["it_refresh_token"], "mock_it_refresh")
 
-    def test_fetch_all_data_vivokid_mocked(self):
+    @patch("custom_components.garmin_jr.garmin_client.requests.post")
+    @patch("custom_components.garmin_jr.garmin_client.requests.get")
+    def test_fetch_all_data_vivokid_mocked(self, mock_requests_get, mock_requests_post):
         """Test parsing of Vivokid family, kids leaderboard, GPS trackpoints, and messages."""
+        mock_requests_post.return_value.status_code = 200
+        mock_requests_post.return_value.json = lambda: {"access_token": "mock_jr_tok", "expires_in": 21600}
+
         client = GarminJrClient(token_data={"di_token": "mock", "it_token": "mock_it"})
         client.client.di_token = "mock"
         client.client._token_expires_soon = MagicMock(return_value=False)
@@ -162,17 +167,24 @@ class TestGarminJrClient(unittest.TestCase):
             def json(self):
                 return self._json
 
-        def mock_get(url, headers=None, timeout=10):
-            if "v2/family/info" in url:
+        def mock_get(url, headers=None, params=None, timeout=10):
+            if "v3/family/info" in url or "v2/family/info" in url:
                 return MockResponse(200, {
                     "status": "OK",
-                    "family": {
+                    "families": [{
                         "familyId": 12345678,
                         "name": "Test Family",
                         "guardians": [],
-                        "kids": []
-                    }
+                        "kids": [{
+                            "id": 98765432,
+                            "name": "TestChild",
+                            "deviceId": "98765432",
+                            "hasLteDevice": True,
+                        }]
+                    }]
                 })
+            if "geofence/all" in url:
+                return MockResponse(200, [])
             if "leaderboard/daily" in url:
                 return MockResponse(200, {
                     "kidStepsData": [
@@ -197,7 +209,7 @@ class TestGarminJrClient(unittest.TestCase):
                 })
             return MockResponse(404, {})
 
-        client.client._api_session.get = MagicMock(side_effect=mock_get)
+        mock_requests_get.side_effect = mock_get
         client.client.connectapi = MagicMock(return_value=[])
 
         # Mock GPS trackpoints and messages
@@ -239,8 +251,13 @@ class TestGarminJrClient(unittest.TestCase):
         self.assertEqual(record["last_message_sender"], "Guardian")
         print("  [OK] Vivokid kids, GPS, and messaging telemetry verified!")
 
-    def test_geofence_discovery_and_resolution(self):
+    @patch("custom_components.garmin_jr.garmin_client.requests.post")
+    @patch("custom_components.garmin_jr.garmin_client.requests.get")
+    def test_geofence_discovery_and_resolution(self, mock_requests_get, mock_requests_post):
         """Test Garmin geofence discovery and active safe zone resolution."""
+        mock_requests_post.return_value.status_code = 200
+        mock_requests_post.return_value.json = lambda: {"access_token": "mock_jr_tok", "expires_in": 21600}
+
         client = GarminJrClient(token_data={"di_token": "mock", "it_token": "mock_it"})
         client.client.di_token = "mock"
         client.client._token_expires_soon = MagicMock(return_value=False)
@@ -290,14 +307,14 @@ class TestGarminJrClient(unittest.TestCase):
             def json(self):
                 return self._json
 
-        def mock_get(url, headers=None, timeout=10):
-            if "v2/family/info" in url:
-                return MockResponse(200, {"status": "OK", "family": {"familyId": 123, "name": "Family"}})
+        def mock_get(url, headers=None, params=None, timeout=10):
+            if "v3/family/info" in url or "v2/family/info" in url:
+                return MockResponse(200, {"status": "OK", "families": [{"familyId": 123, "name": "Family", "kids": [{"id": 98765432, "name": "Kid"}]}]})
             if "leaderboard/daily" in url:
                 return MockResponse(200, {"kidStepsData": [{"id": 98765432, "displayName": "Kid"}]})
             return MockResponse(200, {})
 
-        client.client._api_session.get = MagicMock(side_effect=mock_get)
+        mock_requests_get.side_effect = mock_get
         client.client.connectapi = MagicMock(return_value=[])
 
         data = client.fetch_all_data()
