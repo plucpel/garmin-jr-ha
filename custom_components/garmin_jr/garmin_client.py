@@ -454,7 +454,7 @@ class GarminJrClient:
                     # Fetch Daily Step Summary
                     step_goal = 7500
                     steps_record = None
-                    active_mins = None
+                    active_mins = 0
                     try:
                         sum_url = f"{VIVOKID_BASE_URL}/v2/activity/summary/kid/{kid_id}/{today}"
                         sum_resp = requests.get(sum_url, headers=headers, timeout=10)
@@ -466,6 +466,7 @@ class GarminJrClient:
                                 sum_data.get("activeMinutes")
                                 or sum_data.get("activeMinute")
                                 or ((sum_data.get("walkingMinutes") or 0) + (sum_data.get("runningMinutes") or 0))
+                                or 0
                             )
                             if sum_data.get("lastSyncDate"):
                                 ts_ms = sum_data.get("lastSyncDate")
