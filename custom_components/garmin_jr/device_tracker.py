@@ -95,19 +95,23 @@ class GarminJrTrackerEntity(
         """Return the source type, e.g. GPS."""
         return SourceType.GPS
 
-    def _resolve_zone_coordinates(self) -> tuple[float | None, float | None, str | None]:
-        """Resolve coordinates considering Garmin geofences and HA zone mappings."""
+    def _resolve_zone_coordinates(self) -> tuple[float | None, float | None, str | None, int]:
+        """Resolve device coordinates and matched HA zone based on active safe zone and user mapping.
+
+        Returns (latitude, longitude, matched_ha_zone, accuracy).
+        """
         data = self._child_data
         raw_lat = data.get(ATTR_LATITUDE)
         raw_lon = data.get(ATTR_LONGITUDE)
+        raw_accuracy = int(data.get(ATTR_ACCURACY, 15))
         geofence_id = str(data.get(ATTR_GARMIN_GEOFENCE_ID) or "")
         safe_zone_name = data.get(ATTR_GARMIN_SAFE_ZONE)
 
-        # If not actively in a Garmin safe zone, return raw coordinates
+        # If not actively in a Garmin safe zone, return raw coordinates and accuracy
         if not geofence_id or not safe_zone_name:
             lat = float(raw_lat) if raw_lat is not None else None
             lon = float(raw_lon) if raw_lon is not None else None
-            return lat, lon, None
+            return lat, lon, None, raw_accuracy
 
         # Check configured zone mapping
         zone_mapping = self.entry.options.get(CONF_ZONE_MAPPING, {})
@@ -117,7 +121,7 @@ class GarminJrTrackerEntity(
         if target_mode == "none":
             lat = float(raw_lat) if raw_lat is not None else None
             lon = float(raw_lon) if raw_lon is not None else None
-            return lat, lon, None
+            return lat, lon, None, raw_accuracy
 
         # 2. User mapped to a specific HA zone (e.g. "zone.home" or "zone.school")
         if target_mode.startswith("zone.") and self.hass:
@@ -127,6 +131,7 @@ class GarminJrTrackerEntity(
                     float(zone_state.attributes["latitude"]),
                     float(zone_state.attributes["longitude"]),
                     target_mode,
+                    min(raw_accuracy, 10),
                 )
 
         # 3. Auto-detect: search for an existing HA zone with a matching name
@@ -142,41 +147,44 @@ class GarminJrTrackerEntity(
                         float(z_state.attributes["latitude"]),
                         float(z_state.attributes["longitude"]),
                         z_id,
+                        min(raw_accuracy, 10),
                     )
 
         # 4. Fallback to Garmin's geofence center coordinates if available
         gf_lat = data.get("geofence_latitude")
         gf_lon = data.get("geofence_longitude")
         if gf_lat is not None and gf_lon is not None:
-            return float(gf_lat), float(gf_lon), f"garmin_{safe_zone_name}"
+            gf_radius = int(data.get("geofence_radius") or 15)
+            return float(gf_lat), float(gf_lon), f"garmin_{safe_zone_name}", min(raw_accuracy, gf_radius, 10)
 
         # 5. Fallback to raw coordinates
         lat = float(raw_lat) if raw_lat is not None else None
         lon = float(raw_lon) if raw_lon is not None else None
-        return lat, lon, None
+        return lat, lon, None, raw_accuracy
 
     @property
     def latitude(self) -> float | None:
         """Return latitude value of the device."""
-        lat, _, _ = self._resolve_zone_coordinates()
+        lat, _, _, _ = self._resolve_zone_coordinates()
         return lat
 
     @property
     def longitude(self) -> float | None:
         """Return longitude value of the device."""
-        _, lon, _ = self._resolve_zone_coordinates()
+        _, lon, _, _ = self._resolve_zone_coordinates()
         return lon
 
     @property
     def location_accuracy(self) -> int:
         """Return the location accuracy of the device in meters."""
-        return int(self._child_data.get(ATTR_ACCURACY, 15))
+        _, _, _, accuracy = self._resolve_zone_coordinates()
+        return accuracy
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return entity specific state attributes."""
         data = self._child_data
-        _, _, matched_zone = self._resolve_zone_coordinates()
+        _, _, matched_zone, _ = self._resolve_zone_coordinates()
         return {
             "child_id": self.child_id,
             "device_id": data.get(ATTR_DEVICE_ID),
