@@ -458,13 +458,11 @@ class GarminJrClient:
             url = f"{GCS_API_BASE_URL}/messaging/family/api/v1/messages/user/text"
             payload = {
                 "toUserProfilePk": int(to_user_profile_pk),
-                "mediaType": "Text",
                 "messageText": message_text,
-                "sendRequestId": str(uuid.uuid4()),
             }
             resp = requests.post(url, headers=headers, json=payload, timeout=15)
             if resp.status_code in (200, 201, 204):
-                _LOGGER.debug("Successfully sent text message to profile %s", to_user_profile_pk)
+                _LOGGER.info("Successfully sent text message to profile %s", to_user_profile_pk)
                 return True
             _LOGGER.warning("Failed to send message to %s: %s %s", to_user_profile_pk, resp.status_code, resp.text)
         except Exception as err:
@@ -779,6 +777,8 @@ class GarminJrClient:
                     results[kid_id] = {
                         "child_id": kid_id,
                         "child_name": kid_name,
+                        "connectId": connect_id,
+                        "userProfilePk": connect_id,
                         "device_id": kid_id,
                         "device_name": f"{kid_name}'s Bounce",
                         "model": "Garmin Bounce",

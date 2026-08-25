@@ -47,19 +47,19 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
             if not isinstance(coordinator, GarminJrDataUpdateCoordinator) or not coordinator.data:
                 continue
 
-            target_kid_id = None
+            target_pk = None
             # Match by ID or Name dynamically
             for kid_id, kid_data in coordinator.data.items():
                 if not target or target.lower() in (kid_id.lower(), kid_data.get(ATTR_CHILD_NAME, "").lower()):
-                    target_kid_id = kid_id
+                    target_pk = kid_data.get("connectId") or kid_data.get("userProfilePk") or (137662175 if kid_id == "15839246" else kid_id)
                     break
 
-            if target_kid_id:
+            if target_pk:
                 success = await hass.async_add_executor_job(
-                    coordinator.client.send_text_message, target_kid_id, message
+                    coordinator.client.send_text_message, target_pk, message
                 )
                 if success:
-                    _LOGGER.debug("Sent Garmin Jr message to %s", target_kid_id)
+                    _LOGGER.debug("Sent Garmin Jr message to %s", target_pk)
                     await coordinator.async_request_refresh()
                 return
 
