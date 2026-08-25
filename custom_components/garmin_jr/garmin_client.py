@@ -208,35 +208,34 @@ class GarminJrClient:
             except Exception as err:
                 _LOGGER.debug("Exception during IT token refresh: %s", err)
 
-        # 2. Exchange diauth token for IT OAuth2 via connect2_exchange
-        jr_token = self._ensure_diauth_token()
-        if not jr_token:
-            return
-
-        try:
-            ex_url = f"{SERVICES_BASE_URL}/api/oauth/token?grant_type=connect2_exchange"
-            ex_data = {
-                "client_id": "VIVOFIT_JR_ANDROID",
-                "connect_access_token": jr_token,
-            }
-            ex_headers = {
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Accept-Encoding": "en_US",
-                "User-Agent": "GarminJr/2.0.0 (Android)",
-            }
-            ex_res = requests.post(ex_url, data=ex_data, headers=ex_headers, timeout=15)
-            if ex_res.status_code == 200:
-                ex_json = ex_res.json()
-                self._it_token = ex_json.get("access_token")
-                self._it_refresh_token = ex_json.get("refresh_token")
-                expires_in = ex_json.get("expires_in", 7776000)
-                self._it_expires_at = now + expires_in
-                _LOGGER.debug("Obtained Garmin IT OAuth2 token via connect2_exchange successfully")
-                return
-            else:
-                _LOGGER.debug("connect2_exchange returned %s: %s", ex_res.status_code, ex_res.text)
-        except Exception as err:
-            _LOGGER.debug("Exception during connect2_exchange token exchange: %s", err)
+        # 2. Exchange di_token for IT OAuth2 via connect2_exchange
+        for cand_token in [self._extract_di_token(), self._ensure_diauth_token()]:
+            if not cand_token:
+                continue
+            try:
+                ex_url = f"{SERVICES_BASE_URL}/api/oauth/token?grant_type=connect2_exchange"
+                ex_data = {
+                    "client_id": "VIVOFIT_JR_ANDROID",
+                    "connect_access_token": cand_token,
+                }
+                ex_headers = {
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept-Encoding": "en_US",
+                    "User-Agent": "GarminJr/2.0.0 (Android)",
+                }
+                ex_res = requests.post(ex_url, data=ex_data, headers=ex_headers, timeout=15)
+                if ex_res.status_code == 200:
+                    ex_json = ex_res.json()
+                    self._it_token = ex_json.get("access_token")
+                    self._it_refresh_token = ex_json.get("refresh_token")
+                    expires_in = ex_json.get("expires_in", 7776000)
+                    self._it_expires_at = now + expires_in
+                    _LOGGER.info("Obtained Garmin IT OAuth2 token via connect2_exchange successfully")
+                    return
+                else:
+                    _LOGGER.debug("connect2_exchange returned %s: %s", ex_res.status_code, ex_res.text)
+            except Exception as err:
+                _LOGGER.debug("Exception during connect2_exchange token exchange: %s", err)
 
     def _get_diauth_headers(self) -> dict[str, str]:
         """Get headers for Garmin Jr / Vivokid API endpoints."""
@@ -356,7 +355,7 @@ class GarminJrClient:
             _LOGGER.debug("Could not fetch Garmin geofences: %s", err)
         return []
 
-    def fetch_messages(self, after_iso: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+    def fetch_messages(self, after_iso: str | None = None, limit: int = 30) -> list[dict[str, Any]]:
         """Fetch message history from GCS Messaging API."""
         try:
             headers = self._get_it_headers()
@@ -367,10 +366,55 @@ class GarminJrClient:
             resp = requests.get(url, headers=headers, params=params, timeout=10)
             if resp.status_code == 200:
                 data = resp.json()
+                _LOGGER.debug("GCS fetch_messages raw: %s", data)
                 if isinstance(data, list):
                     return data
                 if isinstance(data, dict):
-                    return data.get("messages") or []
+                    msgs = (
+                        data.get("messages")
+                        or data.get("messageList")
+                        or data.get("items")
+                        or data.get("conversationMessages")
+                        or []
+                    )
+                    if msgs:
+                        return msgs
+                    convs = data.get("conversations") or []
+                    all_c_msgs: list[dict[str, Any]] = []
+                    for c in convs:
+                        all_c_msgs.extend(c.get("messages") or c.get("recentMessages") or [])
+                    if all_c_msgs:
+                        return all_c_msgs
+            else:
+                _LOGGER.debug("GCS guardian/messages returned HTTP %s: %s", resp.status_code, resp.text)
+
+            # Fallback: Query active conversations list if guardian endpoint returned empty
+            try:
+                c_url = f"{GCS_API_BASE_URL}/messaging/family/api/v1/conversations"
+                c_resp = requests.get(c_url, headers=headers, timeout=10)
+                if c_resp.status_code == 200:
+                    c_data = c_resp.json()
+                    conv_list = c_data if isinstance(c_data, list) else (c_data.get("conversations") or [])
+                    fallback_msgs: list[dict[str, Any]] = []
+                    for conv in conv_list:
+                        c_msgs = conv.get("messages") or conv.get("recentMessages") or []
+                        if not c_msgs and conv.get("conversationId"):
+                            cid = conv.get("conversationId")
+                            m_resp = requests.get(
+                                f"{GCS_API_BASE_URL}/messaging/family/api/v1/conversation/{cid}/messages",
+                                headers=headers,
+                                params=params,
+                                timeout=10,
+                            )
+                            if m_resp.status_code == 200:
+                                m_json = m_resp.json()
+                                c_msgs = m_json if isinstance(m_json, list) else (m_json.get("messages") or [])
+                        fallback_msgs.extend(c_msgs)
+                    if fallback_msgs:
+                        return fallback_msgs
+            except Exception as c_err:
+                _LOGGER.debug("Conversations fallback error: %s", c_err)
+
         except Exception as err:
             _LOGGER.debug("Could not fetch messages from GCS API: %s", err)
         return []
