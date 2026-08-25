@@ -125,19 +125,23 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
                         "137662175",
                     } - {"", "None", "null"}
 
-                    event_data = {
-                        "child_id": child_id,
-                        "child_name": child_data.get(ATTR_CHILD_NAME, "Child"),
-                        "message_id": msg_id,
-                        "text": text_content,
-                        "sender": msg.get("senderDisplayName") or msg.get("sender") or ("Benjamin" if from_pk in kid_identifiers else "Guardian"),
-                        "from_user_profile_pk": msg.get("fromUserProfilePk"),
-                        "to_user_profile_pk": msg.get("toUserProfilePk"),
-                        "media_type": msg.get("mediaType", "Text"),
-                        "timestamp": msg.get("createDateTime") or msg.get("createdTimestamp") or msg.get("timestamp"),
-                    }
-                    self.hass.bus.async_fire(EVENT_MESSAGE_RECEIVED, event_data)
-                    LOGGER.info("Fast message poll: received new Garmin message '%s' (event %s fired)", text_content, EVENT_MESSAGE_RECEIVED)
+                    # Only fire EVENT_MESSAGE_RECEIVED for incoming messages sent by the child
+                    is_from_child = from_pk in kid_identifiers
+                    if is_from_child:
+                        event_data = {
+                            "child_id": child_id,
+                            "child_name": child_data.get(ATTR_CHILD_NAME, "Child"),
+                            "message_id": msg_id,
+                            "text": text_content,
+                            "sender": msg.get("senderDisplayName") or msg.get("sender") or ("Benjamin" if is_from_child else "Guardian"),
+                            "from_user_profile_pk": msg.get("fromUserProfilePk"),
+                            "to_user_profile_pk": msg.get("toUserProfilePk"),
+                            "media_type": msg.get("mediaType", "Text"),
+                            "timestamp": msg.get("createDateTime") or msg.get("createdTimestamp") or msg.get("timestamp"),
+                            "incoming": is_from_child,
+                        }
+                        self.hass.bus.async_fire(EVENT_MESSAGE_RECEIVED, event_data)
+                        LOGGER.info("Fast message poll: received incoming Garmin message from child '%s' (event %s fired)", text_content, EVENT_MESSAGE_RECEIVED)
 
                 # Update the latest message attributes on child_data
                 latest_msg = child_messages[0]
@@ -213,19 +217,22 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
                                 str(child_data.get("device_id") or ""),
                                 "137662175",
                             } - {"", "None", "null"}
-                            event_data = {
-                                "child_id": child_id,
-                                "child_name": child_data.get(ATTR_CHILD_NAME, "Child"),
-                                "message_id": msg_id,
-                                "text": text_content,
-                                "sender": msg.get("senderDisplayName") or msg.get("sender") or ("Benjamin" if from_pk in kid_identifiers else "Guardian"),
-                                "from_user_profile_pk": msg.get("fromUserProfilePk"),
-                                "to_user_profile_pk": msg.get("toUserProfilePk"),
-                                "media_type": msg.get("mediaType", "Text"),
-                                "timestamp": msg.get("createDateTime") or msg.get("createdTimestamp") or msg.get("timestamp"),
-                            }
-                            self.hass.bus.async_fire(EVENT_MESSAGE_RECEIVED, event_data)
-                            LOGGER.debug("Fired %s event for message %s (text: %s)", EVENT_MESSAGE_RECEIVED, msg_id, text_content)
+                            is_from_child = from_pk in kid_identifiers
+                            if is_from_child:
+                                event_data = {
+                                    "child_id": child_id,
+                                    "child_name": child_data.get(ATTR_CHILD_NAME, "Child"),
+                                    "message_id": msg_id,
+                                    "text": text_content,
+                                    "sender": msg.get("senderDisplayName") or msg.get("sender") or ("Benjamin" if is_from_child else "Guardian"),
+                                    "from_user_profile_pk": msg.get("fromUserProfilePk"),
+                                    "to_user_profile_pk": msg.get("toUserProfilePk"),
+                                    "media_type": msg.get("mediaType", "Text"),
+                                    "timestamp": msg.get("createDateTime") or msg.get("createdTimestamp") or msg.get("timestamp"),
+                                    "incoming": is_from_child,
+                                }
+                                self.hass.bus.async_fire(EVENT_MESSAGE_RECEIVED, event_data)
+                                LOGGER.debug("Fired %s event for incoming message %s (text: %s)", EVENT_MESSAGE_RECEIVED, msg_id, text_content)
 
             self._initial_fetch_done = True
             return data
