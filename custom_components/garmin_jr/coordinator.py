@@ -81,21 +81,23 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
                             text_content = (
                                 msg.get("messageText")
                                 or msg.get("text")
-                                or msg.get("transcript")
                                 or msg.get("transcription")
+                                or msg.get("transcript")
                                 or msg.get("audioTranscription")
                                 or (msg.get("audioMetadata") or {}).get("transcript")
                                 or (msg.get("audioDetails") or {}).get("transcription")
-                                or (f"[{msg.get('mediaType', 'Audio')}]" if msg.get("mediaType") == "Audio" else "")
+                                or (f"[{msg.get('mediaType', 'Audio')}]" if msg.get("mediaType") in ("Audio", "audio/amr") else "")
                             )
                             event_data = {
                                 "child_id": child_id,
                                 "child_name": child_data.get(ATTR_CHILD_NAME, "Child"),
                                 "message_id": msg_id,
                                 "text": text_content,
-                                "sender": msg.get("senderDisplayName") or msg.get("sender"),
+                                "sender": msg.get("senderDisplayName") or msg.get("sender") or ("Benjamin" if str(msg.get("fromUserProfilePk", "")) in (str(child_id), "137662175") else "Guardian"),
+                                "from_user_profile_pk": msg.get("fromUserProfilePk"),
+                                "to_user_profile_pk": msg.get("toUserProfilePk"),
                                 "media_type": msg.get("mediaType", "Text"),
-                                "timestamp": msg.get("createdTimestamp"),
+                                "timestamp": msg.get("createDateTime") or msg.get("createdTimestamp") or msg.get("timestamp"),
                             }
                             self.hass.bus.async_fire(EVENT_MESSAGE_RECEIVED, event_data)
                             LOGGER.debug("Fired %s event for message %s (text: %s)", EVENT_MESSAGE_RECEIVED, msg_id, text_content)

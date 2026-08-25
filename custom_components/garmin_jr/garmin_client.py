@@ -360,9 +360,11 @@ class GarminJrClient:
         try:
             headers = self._get_it_headers()
             url = f"{GCS_API_BASE_URL}/messaging/family/api/v1/guardian/messages"
-            params: dict[str, Any] = {"limit": limit, "audioMediaType": "OPUS"}
-            if after_iso:
-                params["after"] = after_iso
+            if not after_iso:
+                after_iso = (
+                    datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=7)
+                ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            params: dict[str, Any] = {"after": after_iso, "limit": limit}
             resp = requests.get(url, headers=headers, params=params, timeout=10)
             if resp.status_code == 200:
                 data = resp.json()
@@ -725,18 +727,23 @@ class GarminJrClient:
                             child_messages.append(msg)
 
                     if child_messages:
+                        # Sort newest first so child_messages[0] is the most recent
+                        child_messages.sort(
+                            key=lambda m: str(m.get("createDateTime") or m.get("createdTimestamp") or m.get("timestamp") or ""),
+                            reverse=True,
+                        )
                         latest_msg = child_messages[0]
                         last_msg_text = (
                             latest_msg.get("messageText")
                             or latest_msg.get("text")
-                            or latest_msg.get("transcript")
                             or latest_msg.get("transcription")
+                            or latest_msg.get("transcript")
                             or latest_msg.get("audioTranscription")
                             or (latest_msg.get("audioMetadata") or {}).get("transcript")
                             or (latest_msg.get("audioDetails") or {}).get("transcription")
-                            or (f"[{latest_msg.get('mediaType', 'Audio')}]" if latest_msg.get("mediaType") == "Audio" else None)
+                            or (f"[{latest_msg.get('mediaType', 'Audio')}]" if latest_msg.get("mediaType") in ("Audio", "audio/amr") else None)
                         )
-                        last_msg_time = latest_msg.get("createdTimestamp") or latest_msg.get("timestamp")
+                        last_msg_time = latest_msg.get("createDateTime") or latest_msg.get("createdTimestamp") or latest_msg.get("timestamp")
                         from_pk = str(latest_msg.get("fromUserProfilePk", ""))
                         last_msg_sender = (
                             latest_msg.get("senderDisplayName")
