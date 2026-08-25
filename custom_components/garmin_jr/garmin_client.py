@@ -421,6 +421,35 @@ class GarminJrClient:
             _LOGGER.debug("Could not fetch messages from GCS API: %s", err)
         return []
 
+    def parse_child_messages(
+        self,
+        recent_messages: list[dict[str, Any]],
+        kid_id: str | int,
+        connect_id: str | int | None = None,
+        device_id: str | int | None = None,
+        user_profile_pk: str | int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Filter and sort messages for a specific child newest-first."""
+        kid_identifiers = {
+            str(kid_id),
+            str(connect_id or ""),
+            str(device_id or ""),
+            str(user_profile_pk or ""),
+        } - {"", "None", "null"}
+
+        child_messages: list[dict[str, Any]] = []
+        for msg in recent_messages:
+            to_pk = str(msg.get("toUserProfilePk", ""))
+            from_pk = str(msg.get("fromUserProfilePk", ""))
+            if to_pk in kid_identifiers or from_pk in kid_identifiers:
+                child_messages.append(msg)
+
+        child_messages.sort(
+            key=lambda m: str(m.get("createDateTime") or m.get("createdTimestamp") or m.get("timestamp") or ""),
+            reverse=True,
+        )
+        return child_messages
+
     def send_text_message(self, to_user_profile_pk: str | int, message_text: str) -> bool:
         """Send a text message to a child's Garmin Bounce watch."""
         try:
@@ -712,26 +741,15 @@ class GarminJrClient:
                     last_msg_sender = None
                     last_msg_media = None
 
-                    kid_identifiers = {
-                        str(kid_id),
-                        str(connect_id or ""),
-                        str(kid.get("deviceId") or ""),
-                        str(kid.get("userProfilePk") or ""),
-                    } - {"", "None", "null"}
-
-                    child_messages: list[dict[str, Any]] = []
-                    for msg in recent_messages:
-                        to_pk = str(msg.get("toUserProfilePk", ""))
-                        from_pk = str(msg.get("fromUserProfilePk", ""))
-                        if to_pk in kid_identifiers or from_pk in kid_identifiers:
-                            child_messages.append(msg)
+                    child_messages = self.parse_child_messages(
+                        recent_messages,
+                        kid_id=kid_id,
+                        connect_id=connect_id,
+                        device_id=kid.get("deviceId"),
+                        user_profile_pk=kid.get("userProfilePk"),
+                    )
 
                     if child_messages:
-                        # Sort newest first so child_messages[0] is the most recent
-                        child_messages.sort(
-                            key=lambda m: str(m.get("createDateTime") or m.get("createdTimestamp") or m.get("timestamp") or ""),
-                            reverse=True,
-                        )
                         latest_msg = child_messages[0]
                         last_msg_text = (
                             latest_msg.get("messageText")
@@ -745,6 +763,12 @@ class GarminJrClient:
                         )
                         last_msg_time = latest_msg.get("createDateTime") or latest_msg.get("createdTimestamp") or latest_msg.get("timestamp")
                         from_pk = str(latest_msg.get("fromUserProfilePk", ""))
+                        kid_identifiers = {
+                            str(kid_id),
+                            str(connect_id or ""),
+                            str(kid.get("deviceId") or ""),
+                            str(kid.get("userProfilePk") or ""),
+                        } - {"", "None", "null"}
                         last_msg_sender = (
                             latest_msg.get("senderDisplayName")
                             or latest_msg.get("sender")

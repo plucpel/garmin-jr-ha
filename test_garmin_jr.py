@@ -41,6 +41,7 @@ for mod in [
     "homeassistant.const",
     "homeassistant.exceptions",
     "homeassistant.helpers",
+    "homeassistant.helpers.event",
     "homeassistant.helpers.device_registry",
     "homeassistant.helpers.entity_platform",
     "homeassistant.helpers.update_coordinator",
@@ -55,6 +56,9 @@ for mod in [
         m = types.ModuleType(mod)
         m.__path__ = []
         sys.modules[mod] = m
+
+sys.modules["homeassistant.helpers.event"].async_track_time_interval = lambda *args, **kwargs: (lambda: None)
+sys.modules["homeassistant.core"].CALLBACK_TYPE = Any
 
 ha_flow = sys.modules["homeassistant.data_entry_flow"]
 ha_flow.FlowResult = Any
