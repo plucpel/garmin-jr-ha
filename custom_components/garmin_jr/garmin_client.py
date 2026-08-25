@@ -636,9 +636,9 @@ class GarminJrClient:
                             fp_data = tp.get("familyPointData") or {}
                             status_changes = fp_data.get("statusChanges") or []
                             for sc in status_changes:
-                                dev_state = sc.get("deviceState")
+                                dev_state = str(sc.get("deviceState") or "").upper().replace("_", "")
                                 g_id = sc.get("geofenceId")
-                                if dev_state == "GEOFENCE_ENTER" and g_id is not None:
+                                if dev_state == "GEOFENCEENTER" and g_id is not None:
                                     active_geofence_id = str(g_id)
                                     gf = geofence_by_id.get(active_geofence_id)
                                     if gf:
@@ -650,7 +650,7 @@ class GarminJrClient:
                                     else:
                                         active_geofence_name = f"Zone {active_geofence_id}"
                                     break
-                                elif dev_state == "GEOFENCE_EXIT":
+                                elif dev_state == "GEOFENCEEXIT":
                                     # Last event is exit — child is outside all zones
                                     active_geofence_name = "Outside"
                                     break
@@ -665,15 +665,41 @@ class GarminJrClient:
                     last_msg_time = None
                     last_msg_sender = None
                     last_msg_media = None
+
+                    kid_identifiers = {
+                        str(kid_id),
+                        str(connect_id or ""),
+                        str(kid.get("deviceId") or ""),
+                        str(kid.get("userProfilePk") or ""),
+                    } - {"", "None", "null"}
+
+                    child_messages: list[dict[str, Any]] = []
                     for msg in recent_messages:
                         to_pk = str(msg.get("toUserProfilePk", ""))
                         from_pk = str(msg.get("fromUserProfilePk", ""))
-                        if kid_id in (to_pk, from_pk):
-                            last_msg_text = msg.get("messageText") or msg.get("text") or msg.get("mediaType", "Message")
-                            last_msg_time = msg.get("createdTimestamp") or msg.get("timestamp")
-                            last_msg_sender = msg.get("senderDisplayName") or msg.get("sender") or ("Child" if from_pk == kid_id else "Guardian")
-                            last_msg_media = msg.get("mediaType", "Text")
-                            break
+                        if to_pk in kid_identifiers or from_pk in kid_identifiers:
+                            child_messages.append(msg)
+
+                    if child_messages:
+                        latest_msg = child_messages[0]
+                        last_msg_text = (
+                            latest_msg.get("messageText")
+                            or latest_msg.get("text")
+                            or latest_msg.get("transcript")
+                            or latest_msg.get("transcription")
+                            or latest_msg.get("audioTranscription")
+                            or (latest_msg.get("audioMetadata") or {}).get("transcript")
+                            or (latest_msg.get("audioDetails") or {}).get("transcription")
+                            or (f"[{latest_msg.get('mediaType', 'Audio')}]" if latest_msg.get("mediaType") == "Audio" else None)
+                        )
+                        last_msg_time = latest_msg.get("createdTimestamp") or latest_msg.get("timestamp")
+                        from_pk = str(latest_msg.get("fromUserProfilePk", ""))
+                        last_msg_sender = (
+                            latest_msg.get("senderDisplayName")
+                            or latest_msg.get("sender")
+                            or ("Child" if from_pk in kid_identifiers else "Guardian")
+                        )
+                        last_msg_media = latest_msg.get("mediaType", "Text")
 
                     results[kid_id] = {
                         "child_id": kid_id,
@@ -707,7 +733,7 @@ class GarminJrClient:
                         "geofence_longitude": geofence_lon,
                         "geofence_radius": geofence_radius,
                         "geofences": kid_geofences,
-                        "new_messages": recent_messages,
+                        "new_messages": child_messages,
                     }
             except Exception as lb_err:
                 _LOGGER.warning("Error fetching kid leaderboard for family %s: %s", family_id, lb_err)

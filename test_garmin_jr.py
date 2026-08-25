@@ -327,6 +327,72 @@ class TestGarminJrClient(unittest.TestCase):
         self.assertEqual(len(record["geofences"]), 2)
         print("  [OK] Garmin Safe Zone discovery and status change resolution verified!")
 
+    @patch("custom_components.garmin_jr.garmin_client.requests.post")
+    @patch("custom_components.garmin_jr.garmin_client.requests.get")
+    def test_audio_transcription_and_connect_id_matching(self, mock_requests_get, mock_requests_post):
+        """Test audio voice message transcription extraction and connectId matching."""
+        mock_requests_post.return_value.status_code = 200
+        mock_requests_post.return_value.json = lambda: {"access_token": "mock_tok", "expires_in": 21600}
+
+        client = GarminJrClient(token_data={"di_token": "mock", "it_token": "mock_it"})
+        client.client.di_token = "mock"
+        client.client._token_expires_soon = MagicMock(return_value=False)
+
+        class MockResponse:
+            def __init__(self, status_code, json_data):
+                self.status_code = status_code
+                self._json = json_data
+            def json(self):
+                return self._json
+
+        def mock_get(url, headers=None, params=None, timeout=10):
+            if "v3/family/info" in url or "v2/family/info" in url:
+                return MockResponse(200, {
+                    "status": "OK",
+                    "families": [{
+                        "familyId": 123,
+                        "name": "Family",
+                        "kids": [{
+                            "id": 15839246,
+                            "name": "Benjamin",
+                            "connectId": 99887766,
+                            "deviceId": "dev-123",
+                        }]
+                    }]
+                })
+            if "leaderboard/daily" in url:
+                return MockResponse(200, {"kidStepsData": [{"id": 15839246, "displayName": "Benjamin"}]})
+            return MockResponse(200, {})
+
+        mock_requests_get.side_effect = mock_get
+        client.client.connectapi = MagicMock(return_value=[])
+        client.fetch_trackpoints = MagicMock(return_value=[])
+        client.fetch_geofences = MagicMock(return_value=[])
+
+        # Incoming voice audio message from child using connectId (userProfilePk)
+        client.fetch_messages = MagicMock(return_value=[
+            {
+                "messageId": "msg-voice-99",
+                "toUserProfilePk": 11223344,
+                "fromUserProfilePk": 99887766,
+                "senderDisplayName": "Benjamin",
+                "mediaType": "Audio",
+                "messageText": None,
+                "transcription": "Open the garage door",
+                "createdTimestamp": "2026-08-25T12:50:00Z"
+            }
+        ])
+
+        data = client.fetch_all_data()
+        self.assertIn("15839246", data)
+        record = data["15839246"]
+
+        self.assertEqual(record["last_message"], "Open the garage door")
+        self.assertEqual(record["last_message_sender"], "Benjamin")
+        self.assertEqual(record["last_message_media"], "Audio")
+        self.assertEqual(len(record["new_messages"]), 1)
+        print("  [OK] Audio message transcription extraction and connectId resolution verified!")
+
 if __name__ == "__main__":
     unittest.main()
 

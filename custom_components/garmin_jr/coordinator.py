@@ -78,17 +78,27 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
                         self._seen_message_ids.add(msg_id)
                         # Only fire event after initial startup load to avoid replay storms
                         if self._initial_fetch_done:
+                            text_content = (
+                                msg.get("messageText")
+                                or msg.get("text")
+                                or msg.get("transcript")
+                                or msg.get("transcription")
+                                or msg.get("audioTranscription")
+                                or (msg.get("audioMetadata") or {}).get("transcript")
+                                or (msg.get("audioDetails") or {}).get("transcription")
+                                or (f"[{msg.get('mediaType', 'Audio')}]" if msg.get("mediaType") == "Audio" else "")
+                            )
                             event_data = {
                                 "child_id": child_id,
                                 "child_name": child_data.get(ATTR_CHILD_NAME, "Child"),
                                 "message_id": msg_id,
-                                "text": msg.get("messageText") or msg.get("text"),
+                                "text": text_content,
                                 "sender": msg.get("senderDisplayName") or msg.get("sender"),
                                 "media_type": msg.get("mediaType", "Text"),
                                 "timestamp": msg.get("createdTimestamp"),
                             }
                             self.hass.bus.async_fire(EVENT_MESSAGE_RECEIVED, event_data)
-                            LOGGER.debug("Fired %s event for message %s", EVENT_MESSAGE_RECEIVED, msg_id)
+                            LOGGER.debug("Fired %s event for message %s (text: %s)", EVENT_MESSAGE_RECEIVED, msg_id, text_content)
 
             self._initial_fetch_done = True
             return data
