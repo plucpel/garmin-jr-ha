@@ -582,6 +582,11 @@ class GarminJrClient:
                         "deviceId": k.get("deviceId"),
                         "hasLteDevice": k.get("hasLteDevice", True),
                         "totalPoints": k.get("totalPoints"),
+                        "settings": k.get("settings") or {},
+                        "school_mode": k.get("schoolMode") or (k.get("settings") or {}).get("schoolMode") or {},
+                        "bed_time": k.get("bedTime") or (k.get("settings") or {}).get("bedTime"),
+                        "wake_time": k.get("wakeTime") or (k.get("settings") or {}).get("wakeTime"),
+                        "dnd_settings": k.get("dndSettings") or (k.get("settings") or {}).get("dndSettings") or {},
                     }
 
                 lb_url = f"{VIVOKID_BASE_URL}/v2/leaderboard/daily/{family_id}/{today}"
@@ -809,6 +814,11 @@ class GarminJrClient:
                         "geofence_radius": geofence_radius,
                         "geofences": kid_geofences,
                         "new_messages": child_messages,
+                        "settings": kid.get("settings") or {},
+                        "school_mode": kid.get("school_mode") or (kid.get("settings") or {}).get("schoolMode") or {},
+                        "bed_time": kid.get("bed_time") or (kid.get("settings") or {}).get("bedTime"),
+                        "wake_time": kid.get("wake_time") or (kid.get("settings") or {}).get("wakeTime"),
+                        "dnd_settings": kid.get("dnd_settings") or (kid.get("settings") or {}).get("dndSettings") or {},
                     }
             except Exception as lb_err:
                 _LOGGER.warning("Error fetching kid leaderboard for family %s: %s", family_id, lb_err)
