@@ -5,12 +5,14 @@ import logging
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, ServiceResponse, SupportsResponse
 
 from .const import (
     ATTR_CHILD_ID,
     ATTR_CHILD_NAME,
+    ATTR_LANGUAGE,
     ATTR_MESSAGE,
+    ATTR_SEND_TO_WATCH,
     ATTR_TARGET,
     CONF_DI_CLIENT_ID,
     CONF_DI_REFRESH_TOKEN,
@@ -23,9 +25,17 @@ from .const import (
     PLATFORMS,
     SERVICE_REQUEST_LOCATION_UPDATE,
     SERVICE_SEND_MESSAGE,
+    SERVICE_SPOT_PLANE,
 )
 from .coordinator import GarminJrDataUpdateCoordinator
 from .garmin_client import GarminJrClient
+from .plane_spotter import (
+    enrich_flight_details,
+    fetch_live_aircraft_sync,
+    filter_and_rank_planes,
+    format_bounce_response,
+    resolve_kid_location,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -90,9 +100,89 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
 
         _LOGGER.warning("Could not find Garmin Jr child profile matching target: %s", target)
 
+    async def async_handle_spot_plane(call: Any) -> ServiceResponse:
+        """Handle spot_plane service call: find overhead planes and optionally message watch."""
+        target = str(call.data.get(ATTR_TARGET, "")).strip()
+        send_to_watch = call.data.get(ATTR_SEND_TO_WATCH, True)
+        language = str(call.data.get(ATTR_LANGUAGE, "fr")).strip().lower()
+
+        for entry_id, coordinator in hass.data.get(DOMAIN, {}).items():
+            if not isinstance(coordinator, GarminJrDataUpdateCoordinator) or not coordinator.data:
+                continue
+
+            target_kid_id = None
+            target_kid_data = None
+            target_pk = None
+
+            for kid_id, kid_data in coordinator.data.items():
+                if not target or target.lower() in (kid_id.lower(), kid_data.get(ATTR_CHILD_NAME, "").lower()):
+                    target_kid_id = kid_id
+                    target_kid_data = kid_data
+                    target_pk = kid_data.get("connectId") or kid_data.get("userProfilePk") or (137662175 if kid_id == "15839246" else kid_id)
+                    break
+
+            if target_kid_id and target_kid_data:
+                # 1. Resolve 3-tier child location
+                loc_info = resolve_kid_location(hass, target_kid_data, target_kid_id)
+
+                # Asynchronous background refresh if location is stale
+                if loc_info.get("stale") and loc_info.get("source") == "watch_gps":
+                    _LOGGER.debug("Dispatching async background location refresh for %s (stale location)", target_kid_id)
+                    hass.async_create_task(
+                        hass.async_add_executor_job(
+                            coordinator.client.request_location_update, target_kid_id
+                        )
+                    )
+
+                # 2. Fetch live aircraft around coordinates
+                aircraft_raw = await hass.async_add_executor_job(
+                    fetch_live_aircraft_sync, loc_info["latitude"], loc_info["longitude"], 35.0
+                )
+
+                # 3. Filter and rank planes by sightline & elevation
+                ranked_planes = filter_and_rank_planes(
+                    loc_info["latitude"], loc_info["longitude"], aircraft_raw, max_distance_km=30.0, min_elevation_deg=12.0
+                )
+
+                top_plane = None
+                if ranked_planes:
+                    top_plane = enrich_flight_details(ranked_planes[0], language=language)
+
+                # 4. Format kid-friendly watch message
+                formatted_msg = format_bounce_response(top_plane, loc_info, language=language)
+
+                # 5. Optionally send to watch
+                if send_to_watch and target_pk:
+                    await hass.async_add_executor_job(
+                        coordinator.client.send_text_message, target_pk, formatted_msg
+                    )
+
+                return {
+                    "found": bool(top_plane),
+                    "message": formatted_msg,
+                    "flight": top_plane or {},
+                    "location": loc_info,
+                    "total_nearby_aircraft": len(ranked_planes),
+                }
+
+        _LOGGER.warning("Could not find Garmin Jr child profile matching target: %s", target)
+        return {
+            "found": False,
+            "message": "Enfant non trouvé",
+            "flight": {},
+            "location": {},
+            "total_nearby_aircraft": 0,
+        }
+
     hass.services.async_register(DOMAIN, SERVICE_SEND_MESSAGE, async_handle_send_message)
     hass.services.async_register(
         DOMAIN, SERVICE_REQUEST_LOCATION_UPDATE, async_handle_request_location_update
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SPOT_PLANE,
+        async_handle_spot_plane,
+        supports_response=SupportsResponse.OPTIONAL,
     )
 
     return True

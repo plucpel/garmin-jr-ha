@@ -38,10 +38,13 @@ EVENT_MESSAGE_RECEIVED = "garmin_jr_message_received"
 SERVICE_SEND_MESSAGE = "send_message"
 SERVICE_REQUEST_LOCATION_UPDATE = "request_location_update"
 SERVICE_SET_STEP_GOAL = "set_step_goal"
+SERVICE_SPOT_PLANE = "spot_plane"
 
 ATTR_MESSAGE = "message"
 ATTR_TARGET = "target"
 ATTR_GOAL = "goal"
+ATTR_SEND_TO_WATCH = "send_to_watch"
+ATTR_LANGUAGE = "language"
 
 # Data keys
 ATTR_CHILD_ID = "child_id"
