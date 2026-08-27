@@ -29,15 +29,18 @@ from .garmin_client import GarminJrAuthError, GarminJrClient, GarminJrConnection
 FAST_MESSAGE_POLL_INTERVAL_SECONDS = 10
 
 
-def is_child_in_quiet_time(child_data: dict[str, Any], current_dt: Any = None) -> tuple[bool, str]:
-    """Check if child is in School Mode, DND, or Sleep Time based strictly on watch settings."""
+def get_child_operating_mode(child_data: dict[str, Any], current_dt: Any = None) -> str:
+    """Check if child is in School Mode, Sleep Time, or Active based strictly on watch settings.
+
+    Returns: 'school_mode', 'sleep_time', or 'active'.
+    """
     import datetime
     if current_dt is None:
         current_dt = datetime.datetime.now()
 
     settings = child_data.get("settings") or {}
 
-    # 1. School Mode check
+    # 1. School Mode check (Watch is locked, time-only -> 0 message polling)
     school_mode = child_data.get("school_mode") or settings.get("schoolMode") or settings.get("school_mode") or {}
     if school_mode.get("enabled", True):
         current_weekday = current_dt.weekday()  # 0-4 = Mon-Fri
@@ -58,11 +61,11 @@ def is_child_in_quiet_time(child_data: dict[str, Any], current_dt: Any = None) -
 
             is_school_day = today_name in [str(d).upper() for d in school_days] or (current_weekday < 5 and not school_mode.get("days"))
             if is_school_day and start_minutes <= now_minutes < end_minutes:
-                return True, "school_mode"
+                return "school_mode"
         except Exception:
             pass
 
-    # 2. Bedtime / Wake time window
+    # 2. Bedtime / Wake time window (Child can message, but silent notifications -> 60s polling)
     bed_time_str = child_data.get("bed_time") or settings.get("bedTime") or settings.get("bed_time") or "21:00"
     wake_time_str = child_data.get("wake_time") or settings.get("wakeTime") or settings.get("wake_time") or "07:00"
     try:
@@ -74,18 +77,18 @@ def is_child_in_quiet_time(child_data: dict[str, Any], current_dt: Any = None) -
 
         if bed_mins > wake_mins:
             if now_mins >= bed_mins or now_mins < wake_mins:
-                return True, "sleep_time"
+                return "sleep_time"
         else:
             if bed_mins <= now_mins < wake_mins:
-                return True, "sleep_time"
+                return "sleep_time"
     except Exception:
         pass
 
     # 3. DND flag
     if settings.get("dndEnabled") or settings.get("dnd_enabled"):
-        return True, "dnd"
+        return "sleep_time"
 
-    return False, "active"
+    return "active"
 
 
 class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
@@ -105,7 +108,7 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
         self._seen_message_ids: set[str] = set()
         self._initial_fetch_done: bool = False
         self._unsub_msg_poll: CALLBACK_TYPE | None = None
-        self._last_quiet_poll_ts: float = 0.0
+        self._last_night_poll_ts: float = 0.0
 
         scan_interval_seconds = entry.options.get(
             CONF_SCAN_INTERVAL,
@@ -137,27 +140,44 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
             LOGGER.debug("Stopped Garmin Jr fast message polling timer")
 
     async def _async_poll_messages(self, _now: Any = None) -> None:
-        """Adaptive poll for incoming messages: fast 10s active, quiet 15m in School/Night."""
+        """Adaptive poll for messages: 0 polling in School Mode, 60s in Night Mode, 10s Active."""
         if not self.data or not self._initial_fetch_done:
             return
 
-        # Check if child is in quiet mode (School Mode, DND, Bedtime) based strictly on watch settings
-        all_quiet = True
-        quiet_reason = ""
-        for child_id, child_data in self.data.items():
-            is_quiet, reason = is_child_in_quiet_time(child_data)
-            if not is_quiet:
-                all_quiet = False
-                break
-            else:
-                quiet_reason = reason
+        # Check operating mode across children
+        highest_mode = "active"
+        if self.data:
+            has_active = False
+            has_night = False
+            has_school = False
+            for child_id, child_data in self.data.items():
+                mode = get_child_operating_mode(child_data)
+                if mode == "active":
+                    has_active = True
+                    break
+                elif mode == "sleep_time":
+                    has_night = True
+                elif mode == "school_mode":
+                    has_school = True
 
-        if all_quiet and self.data:
-            now_ts = time.time()
-            if (now_ts - self._last_quiet_poll_ts) < 900:
+            if has_active:
+                highest_mode = "active"
+            elif has_night:
+                highest_mode = "sleep_time"
+            elif has_school:
+                highest_mode = "school_mode"
+
+        # 1. School Mode: Completely stop polling (0 API requests)
+        if highest_mode == "school_mode":
+            return
+
+        # 2. Night Mode: Relaxed 60-second polling
+        now_ts = time.time()
+        if highest_mode == "sleep_time":
+            if (now_ts - self._last_night_poll_ts) < 60:
                 return
-            self._last_quiet_poll_ts = now_ts
-            LOGGER.debug("Garmin Jr quiet mode active (%s) - running relaxed 15-min background poll", quiet_reason)
+            self._last_night_poll_ts = now_ts
+            LOGGER.debug("Garmin Jr night mode active - polling at relaxed 60s interval")
 
         try:
             recent_messages = await self.hass.async_add_executor_job(
