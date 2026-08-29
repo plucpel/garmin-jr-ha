@@ -91,6 +91,8 @@ ha_coord.UpdateFailed = type("UpdateFailed", (Exception,), {})
 ha_core = sys.modules["homeassistant.core"]
 ha_core.callback = lambda f: f
 ha_core.HomeAssistant = type("HomeAssistant", (), {})
+ha_core.ServiceResponse = Any
+ha_core.SupportsResponse = type("SupportsResponse", (), {"OPTIONAL": "optional", "ONLY": "only", "NONE": "none"})
 
 ha_entries = sys.modules["homeassistant.config_entries"]
 ha_entries.ConfigEntry = type("ConfigEntry", (), {})
@@ -397,7 +399,43 @@ class TestGarminJrClient(unittest.TestCase):
         self.assertEqual(len(record["new_messages"]), 1)
         print("  [OK] Audio message transcription extraction and connectId resolution verified!")
 
+    def test_spot_plane_pipeline(self):
+        """Test the plane spotting filter, ranking, and response formatting pipeline."""
+        from custom_components.garmin_jr.plane_spotter import (
+            filter_and_rank_planes,
+            enrich_flight_details,
+            format_bounce_response,
+        )
+
+        user_lat, user_lon = 46.7863, -71.2541
+        mock_aircraft = [
+            {
+                "icao24": "c01234",
+                "callsign": "ACA890",
+                "type_code": "A223",
+                "latitude": 46.7900,
+                "longitude": -71.2500,
+                "altitude_m": 3000.0,
+                "altitude_ft": 9842.0,
+            }
+        ]
+
+        ranked = filter_and_rank_planes(user_lat, user_lon, mock_aircraft, max_distance_km=30.0)
+        self.assertEqual(len(ranked), 1)
+
+        enriched = enrich_flight_details(ranked[0], language="fr")
+        self.assertEqual(enriched["airline"], "Air Canada")
+        self.assertEqual(enriched["model_name"], "Airbus A220-300")
+
+        loc_info = {"latitude": user_lat, "longitude": user_lon, "zone_name": "Home"}
+        msg = format_bounce_response(enriched, loc_info, language="fr")
+        self.assertIn("Air Canada", msg)
+        self.assertIn("ACA890", msg)
+        self.assertLess(len(msg), 140)
+        print("  [OK] Plane spotting filter, enrichment, and Bounce watch formatting verified!")
+
 if __name__ == "__main__":
     unittest.main()
+
 
 

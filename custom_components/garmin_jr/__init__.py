@@ -83,18 +83,18 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
             if not isinstance(coordinator, GarminJrDataUpdateCoordinator) or not coordinator.data:
                 continue
 
-            target_kid_id = None
+            target_device_id = None
             for kid_id, kid_data in coordinator.data.items():
                 if not target or target.lower() in (kid_id.lower(), kid_data.get(ATTR_CHILD_NAME, "").lower()):
-                    target_kid_id = kid_id
+                    target_device_id = kid_data.get("deviceId") or kid_id
                     break
 
-            if target_kid_id:
+            if target_device_id:
                 success = await hass.async_add_executor_job(
-                    coordinator.client.request_location_update, target_kid_id
+                    coordinator.client.request_location_update, target_device_id
                 )
                 if success:
-                    _LOGGER.debug("Requested location refresh for %s", target_kid_id)
+                    _LOGGER.debug("Requested location refresh for %s", target_device_id)
                     await coordinator.async_request_refresh()
                 return
 
@@ -128,11 +128,16 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
                 # Asynchronous background refresh if location is stale
                 if loc_info.get("stale") and loc_info.get("source") == "watch_gps":
                     _LOGGER.debug("Dispatching async background location refresh for %s (stale location)", target_kid_id)
-                    hass.async_create_task(
-                        hass.async_add_executor_job(
-                            coordinator.client.request_location_update, target_kid_id
-                        )
-                    )
+                    device_target = target_kid_data.get("deviceId") or target_kid_id
+                    async def _bg_location_refresh() -> None:
+                        try:
+                            await hass.async_add_executor_job(
+                                coordinator.client.request_location_update, device_target
+                            )
+                        except Exception as ex:
+                            _LOGGER.debug("Background location refresh failed for %s: %s", device_target, ex)
+
+                    hass.async_create_background_task(_bg_location_refresh(), name="garmin_jr_bg_location_refresh")
 
                 # 2. Fetch live aircraft around coordinates
                 aircraft_raw = await hass.async_add_executor_job(
