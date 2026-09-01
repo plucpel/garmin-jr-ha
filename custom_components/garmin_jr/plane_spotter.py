@@ -239,61 +239,19 @@ def resolve_kid_location(
 
 
 def fetch_live_aircraft_sync(
-    lat: float, lon: float, radius_km: float = 35.0
+    lat: float, lon: float, radius_km: float = 45.0
 ) -> list[dict[str, Any]]:
-    """Fetch live aircraft states around a coordinate from OpenSky Network or Airplanes.live."""
-    delta_lat = radius_km / 111.0
-    delta_lon = radius_km / (111.0 * max(0.2, math.cos(math.radians(lat))))
+    """Fetch live aircraft states around coordinates prioritizing fast ADS-B feeds."""
+    aircraft: list[dict[str, Any]] = []
 
-    lamin = lat - delta_lat
-    lamax = lat + delta_lat
-    lomin = lon - delta_lon
-    lomax = lon + delta_lon
-
-    # Try OpenSky Network first
+    # 1. Try Airplanes.live first (fastest, type codes, registration, no rate-limits)
     try:
-        url = f"{OPENSKY_API_URL}?lamin={lamin:.4f}&lomin={lomin:.4f}&lamax={lamax:.4f}&lomax={lomax:.4f}"
-        resp = requests.get(url, timeout=5)
-        if resp.status_code == 200:
-            data = resp.json()
-            states = data.get("states") or []
-            aircraft = []
-            for s in states:
-                callsign = (s[1] or "").strip()
-                s_lon = s[5]
-                s_lat = s[6]
-                s_alt = s[7] or s[13] or 0.0
-                on_ground = s[8]
-                velocity = s[9] or 0.0
-                track = s[10] or 0.0
-
-                if s_lat is not None and s_lon is not None and not on_ground and s_alt > 50:
-                    aircraft.append({
-                        "icao24": s[0],
-                        "callsign": callsign,
-                        "origin_country": s[2],
-                        "latitude": float(s_lat),
-                        "longitude": float(s_lon),
-                        "altitude_m": float(s_alt),
-                        "altitude_ft": float(s_alt) * 3.28084,
-                        "speed_kmh": float(velocity) * 3.6,
-                        "track": float(track),
-                        "source": "opensky",
-                    })
-            if aircraft:
-                return aircraft
-    except Exception as err:
-        _LOGGER.debug("OpenSky query error: %s", err)
-
-    # Fallback to Airplanes.live
-    try:
-        nm_radius = int(radius_km * 0.539957)
+        nm_radius = max(5, int(radius_km * 0.539957))
         url = f"{AIRPLANES_LIVE_URL}/{lat:.4f}/{lon:.4f}/{nm_radius}"
-        resp = requests.get(url, timeout=5)
+        resp = requests.get(url, timeout=4)
         if resp.status_code == 200:
             data = resp.json()
             ac_list = data.get("ac") or []
-            aircraft = []
             for a in ac_list:
                 callsign = (a.get("flight") or "").strip()
                 a_lat = a.get("lat")
@@ -321,7 +279,48 @@ def fetch_live_aircraft_sync(
             if aircraft:
                 return aircraft
     except Exception as err:
-        _LOGGER.debug("Airplanes.live fallback query error: %s", err)
+        _LOGGER.debug("Airplanes.live query error: %s", err)
+
+    # 2. Fallback to OpenSky Network
+    delta_lat = radius_km / 111.0
+    delta_lon = radius_km / (111.0 * max(0.2, math.cos(math.radians(lat))))
+    lamin = lat - delta_lat
+    lamax = lat + delta_lat
+    lomin = lon - delta_lon
+    lomax = lon + delta_lon
+
+    try:
+        url = f"{OPENSKY_API_URL}?lamin={lamin:.4f}&lomin={lomin:.4f}&lamax={lamax:.4f}&lomax={lomax:.4f}"
+        resp = requests.get(url, timeout=3)
+        if resp.status_code == 200:
+            data = resp.json()
+            states = data.get("states") or []
+            for s in states:
+                callsign = (s[1] or "").strip()
+                s_lon = s[5]
+                s_lat = s[6]
+                s_alt = s[7] or s[13] or 0.0
+                on_ground = s[8]
+                velocity = s[9] or 0.0
+                track = s[10] or 0.0
+
+                if s_lat is not None and s_lon is not None and not on_ground and s_alt > 50:
+                    aircraft.append({
+                        "icao24": s[0],
+                        "callsign": callsign,
+                        "origin_country": s[2],
+                        "latitude": float(s_lat),
+                        "longitude": float(s_lon),
+                        "altitude_m": float(s_alt),
+                        "altitude_ft": float(s_alt) * 3.28084,
+                        "speed_kmh": float(velocity) * 3.6,
+                        "track": float(track),
+                        "source": "opensky",
+                    })
+            if aircraft:
+                return aircraft
+    except Exception as err:
+        _LOGGER.debug("OpenSky fallback query error: %s", err)
 
     return []
 
@@ -330,10 +329,10 @@ def filter_and_rank_planes(
     user_lat: float,
     user_lon: float,
     aircraft_list: list[dict[str, Any]],
-    max_distance_km: float = 30.0,
-    min_elevation_deg: float = 12.0,
+    max_distance_km: float = 45.0,
+    min_elevation_deg: float = 5.0,
 ) -> list[dict[str, Any]]:
-    """Filter planes within visible sightline and rank by elevation angle and proximity."""
+    """Filter planes within visible sightline and rank by visual prominence and proximity."""
     candidates = []
     for ac in aircraft_list:
         dist_m, bearing, elevation_deg = haversine_bearing_elevation(
@@ -341,14 +340,16 @@ def filter_and_rank_planes(
         )
         dist_km = dist_m / 1000.0
 
-        if dist_km <= max_distance_km:
-            if elevation_deg >= min_elevation_deg or (dist_km <= 3.0 and elevation_deg >= 8.0):
-                ac_copy = dict(ac)
-                ac_copy["distance_km"] = round(dist_km, 1)
-                ac_copy["bearing_deg"] = round(bearing, 1)
-                ac_copy["elevation_deg"] = round(elevation_deg, 1)
-                ac_copy["slant_range_km"] = round(math.sqrt(dist_km**2 + (ac["altitude_m"]/1000.0)**2), 1)
-                candidates.append(ac_copy)
+        if dist_km <= max_distance_km and elevation_deg >= min_elevation_deg:
+            ac_copy = dict(ac)
+            ac_copy["distance_km"] = round(dist_km, 1)
+            ac_copy["bearing_deg"] = round(bearing, 1)
+            ac_copy["elevation_deg"] = round(elevation_deg, 1)
+            ac_copy["slant_range_km"] = round(math.sqrt(dist_km**2 + (ac["altitude_m"] / 1000.0)**2), 1)
+            # Prominence score: higher elevation and closer distance score highest
+            prominence = (elevation_deg * 2.0) + (ac["altitude_m"] / 1000.0) / max(1.0, dist_km) * 10.0
+            ac_copy["prominence"] = prominence
+            candidates.append(ac_copy)
 
     candidates.sort(key=lambda x: (-x["elevation_deg"], x["distance_km"]))
     return candidates

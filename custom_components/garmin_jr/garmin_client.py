@@ -747,7 +747,7 @@ class GarminJrClient:
                     child_messages = self.parse_child_messages(
                         recent_messages,
                         kid_id=kid_id,
-                        connect_id=connect_id,
+                        connect_id=kid_connect_id,
                         device_id=kid.get("deviceId"),
                         user_profile_pk=kid.get("userProfilePk"),
                     )
@@ -768,7 +768,7 @@ class GarminJrClient:
                         from_pk = str(latest_msg.get("fromUserProfilePk", ""))
                         kid_identifiers = {
                             str(kid_id),
-                            str(connect_id or ""),
+                            str(kid_connect_id or ""),
                             str(kid.get("deviceId") or ""),
                             str(kid.get("userProfilePk") or ""),
                         } - {"", "None", "null"}
