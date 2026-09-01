@@ -279,7 +279,7 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
         # 4. Active: Poll messages
         try:
             recent_messages = await self.hass.async_add_executor_job(
-                self.client.fetch_messages, None, 15
+                self.client.fetch_messages, None, 100
             )
             if not recent_messages:
                 return

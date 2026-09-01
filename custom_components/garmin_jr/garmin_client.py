@@ -419,23 +419,25 @@ class GarminJrClient:
             _LOGGER.debug("Could not fetch Garmin geofences: %s", err)
         return []
 
-    def fetch_messages(self, after_iso: str | None = None, limit: int = 30) -> list[dict[str, Any]]:
+    def fetch_messages(self, after_iso: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         """Fetch message history from GCS Messaging API."""
         try:
             headers = self._get_it_headers()
             url = f"{GCS_API_BASE_URL}/messaging/family/api/v1/guardian/messages"
             if not after_iso:
+                # Default to 12 hours ago so ascending pagination always includes today's latest messages
                 after_iso = (
-                    datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=7)
+                    datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=12)
                 ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-            params: dict[str, Any] = {"after": after_iso, "limit": limit}
+            params: dict[str, Any] = {"after": after_iso, "limit": max(limit, 100)}
             resp = requests.get(url, headers=headers, params=params, timeout=10)
             if resp.status_code == 200:
                 data = resp.json()
                 _LOGGER.debug("GCS fetch_messages raw: %s", data)
+                result_msgs: list[dict[str, Any]] = []
                 if isinstance(data, list):
-                    return data
-                if isinstance(data, dict):
+                    result_msgs = data
+                elif isinstance(data, dict):
                     msgs = (
                         data.get("messages")
                         or data.get("messageList")
@@ -444,13 +446,22 @@ class GarminJrClient:
                         or []
                     )
                     if msgs:
-                        return msgs
-                    convs = data.get("conversations") or []
-                    all_c_msgs: list[dict[str, Any]] = []
-                    for c in convs:
-                        all_c_msgs.extend(c.get("messages") or c.get("recentMessages") or [])
-                    if all_c_msgs:
-                        return all_c_msgs
+                        result_msgs = msgs
+                    else:
+                        convs = data.get("conversations") or []
+                        all_c_msgs: list[dict[str, Any]] = []
+                        for c in convs:
+                            all_c_msgs.extend(c.get("messages") or c.get("recentMessages") or [])
+                        if all_c_msgs:
+                            result_msgs = all_c_msgs
+
+                if result_msgs:
+                    result_msgs.sort(
+                        key=lambda m: str(m.get("createDateTime") or m.get("createdTimestamp") or m.get("timestamp") or ""),
+                        reverse=True,
+                    )
+                    return result_msgs
+                return []
             else:
                 _LOGGER.debug("GCS guardian/messages returned HTTP %s: %s", resp.status_code, resp.text)
 
