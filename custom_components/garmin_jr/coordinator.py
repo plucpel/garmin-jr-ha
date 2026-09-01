@@ -301,9 +301,7 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
                     if not msg_id or msg_id in self._seen_message_ids:
                         continue
 
-                    self._seen_message_ids.add(msg_id)
-                    has_updates = True
-
+                    # Check for text or speech-to-text transcript
                     text_content = (
                         msg.get("messageText")
                         or msg.get("text")
@@ -312,8 +310,25 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
                         or msg.get("audioTranscription")
                         or (msg.get("audioMetadata") or {}).get("transcript")
                         or (msg.get("audioDetails") or {}).get("transcription")
-                        or (f"[{msg.get('mediaType', 'Audio')}]" if msg.get("mediaType") in ("Audio", "audio/amr") else "")
                     )
+
+                    # If audio message is fresh (< 90s) and pending Garmin speech-to-text, defer marking seen
+                    media_type = msg.get("mediaType", "")
+                    if not text_content and media_type in ("Audio", "audio/amr"):
+                        msg_time_str = msg.get("createDateTime") or msg.get("createdTimestamp") or ""
+                        try:
+                            msg_dt = dt_util.parse_datetime(msg_time_str) if msg_time_str else None
+                            if msg_dt and (dt_util.now() - msg_dt).total_seconds() < 90:
+                                LOGGER.debug("Audio message %s pending Garmin transcription, deferring...", msg_id)
+                                continue
+                        except Exception:
+                            pass
+
+                    if not text_content and media_type in ("Audio", "audio/amr"):
+                        text_content = f"[{media_type}]"
+
+                    self._seen_message_ids.add(msg_id)
+                    has_updates = True
                     from_pk = str(msg.get("fromUserProfilePk", ""))
                     kid_identifiers = {
                         str(child_id),
@@ -406,19 +421,35 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
                         continue
 
                     if msg_id not in self._seen_message_ids:
+                        # Check for text or speech-to-text transcript
+                        text_content = (
+                            msg.get("messageText")
+                            or msg.get("text")
+                            or msg.get("transcription")
+                            or msg.get("transcript")
+                            or msg.get("audioTranscription")
+                            or (msg.get("audioMetadata") or {}).get("transcript")
+                            or (msg.get("audioDetails") or {}).get("transcription")
+                        )
+
+                        # If audio message is fresh (< 90s) and pending Garmin speech-to-text, defer marking seen
+                        media_type = msg.get("mediaType", "")
+                        if not text_content and media_type in ("Audio", "audio/amr"):
+                            msg_time_str = msg.get("createDateTime") or msg.get("createdTimestamp") or ""
+                            try:
+                                msg_dt = dt_util.parse_datetime(msg_time_str) if msg_time_str else None
+                                if msg_dt and (dt_util.now() - msg_dt).total_seconds() < 90:
+                                    LOGGER.debug("Audio message %s pending Garmin transcription in update_data, deferring...", msg_id)
+                                    continue
+                            except Exception:
+                                pass
+
+                        if not text_content and media_type in ("Audio", "audio/amr"):
+                            text_content = f"[{media_type}]"
+
                         self._seen_message_ids.add(msg_id)
                         # Only fire event after initial startup load to avoid replay storms
                         if self._initial_fetch_done:
-                            text_content = (
-                                msg.get("messageText")
-                                or msg.get("text")
-                                or msg.get("transcription")
-                                or msg.get("transcript")
-                                or msg.get("audioTranscription")
-                                or (msg.get("audioMetadata") or {}).get("transcript")
-                                or (msg.get("audioDetails") or {}).get("transcription")
-                                or (f"[{msg.get('mediaType', 'Audio')}]" if msg.get("mediaType") in ("Audio", "audio/amr") else "")
-                            )
                             from_pk = str(msg.get("fromUserProfilePk", ""))
                             kid_identifiers = {
                                 str(child_id),

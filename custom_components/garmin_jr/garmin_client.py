@@ -762,8 +762,11 @@ class GarminJrClient:
                     kid_connect_id = kid.get("connectId")
                     trackpoints = self.fetch_trackpoints(kid_id, limit=50, connect_id=kid_connect_id)
                     if trackpoints:
-                        # Use last trackpoint for position (most recent)
-                        latest_pt = trackpoints[-1] if trackpoints else {}
+                        # Sort trackpoints ascending by timestamp to guarantee latest_pt is newest
+                        trackpoints.sort(
+                            key=lambda tp: str(tp.get("timestamp") or tp.get("dateTime") or tp.get("date") or "")
+                        )
+                        latest_pt = trackpoints[-1]
                         pos = latest_pt.get("position") or {}
 
                         # Convert from Garmin semicircles to degrees
