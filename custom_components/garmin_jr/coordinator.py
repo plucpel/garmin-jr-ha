@@ -181,6 +181,7 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
         self._school_mode_pause_until: float = 0.0
         self._last_night_poll_ts: float = 0.0
         self._school_mode_overrides: dict[str, bool] = {}
+        self._was_in_school_mode: bool = False
 
         scan_interval_seconds = entry.options.get(
             CONF_SCAN_INTERVAL,
@@ -255,12 +256,18 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
         if max_school_end_dt and max_school_end_dt > local_now:
             pause_seconds = (max_school_end_dt - local_now).total_seconds() + 5  # 5s safety margin
             self._school_mode_pause_until = now_ts + pause_seconds
+            self._was_in_school_mode = True
             LOGGER.info(
                 "Garmin Jr: Watch in School Mode until %s. Pausing message polling for %d seconds",
                 max_school_end_dt.strftime("%H:%M:%S"),
                 int(pause_seconds),
             )
             return
+
+        if self._was_in_school_mode:
+            self._was_in_school_mode = False
+            LOGGER.info("Garmin Jr: School Mode ended for the day. Resuming active fast polling and requesting full refresh.")
+            self.hass.async_create_task(self.async_request_refresh())
 
         # 3. Night Mode (Sleep Time): Relax polling to 60s
         if is_night_mode:
