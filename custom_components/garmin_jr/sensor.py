@@ -37,11 +37,16 @@ from .const import (
     ATTR_LAST_MESSAGE_TIME,
     ATTR_LAST_SYNC,
     ATTR_MODEL,
+    ATTR_SCHOOL_MODE,
     ATTR_STEPS,
     ATTR_STEPS_RECORD,
     DOMAIN,
 )
-from .coordinator import GarminJrDataUpdateCoordinator
+from .coordinator import (
+    GarminJrDataUpdateCoordinator,
+    get_child_operating_mode,
+    get_child_school_mode_end_time,
+)
 
 SENSOR_TYPES: dict[str, dict[str, Any]] = {
     "steps": {
@@ -115,6 +120,14 @@ SENSOR_TYPES: dict[str, dict[str, Any]] = {
         "state_class": None,
         "unit": None,
         "data_key": ATTR_GARMIN_SAFE_ZONE,
+    },
+    "school_mode": {
+        "name": "School Mode",
+        "icon": "mdi:school-outline",
+        "device_class": None,
+        "state_class": None,
+        "unit": None,
+        "data_key": ATTR_SCHOOL_MODE,
     },
 }
 
@@ -192,6 +205,13 @@ class GarminJrSensorEntity(
         val = data.get(self.spec["data_key"])
         if self.sensor_type == "safe_zone":
             return val or "Outside"
+        if self.sensor_type == "school_mode":
+            in_school = get_child_school_mode_end_time(data) is not None
+            sm = data.get("school_mode") or {}
+            mode = str(sm.get("mode") or "Off")
+            if mode.upper() == "OFF":
+                return "Off"
+            return "Active" if in_school else "Inactive"
         if self.sensor_type in ("steps", "active_minutes"):
             return val if val is not None else 0
         if self.sensor_type == "last_sync" and val is not None:
@@ -235,6 +255,14 @@ class GarminJrSensorEntity(
             attrs["geofence_id"] = data.get(ATTR_GARMIN_GEOFENCE_ID)
             attrs["has_wifi"] = data.get(ATTR_HAS_WIFI, False)
             attrs["fix_type"] = data.get(ATTR_FIX_TYPE)
+        elif self.sensor_type == "school_mode":
+            sm = data.get("school_mode") or {}
+            attrs["start_time"] = sm.get("startTime") or sm.get("start_time") or "08:00"
+            attrs["end_time"] = sm.get("endTime") or sm.get("end_time") or "15:00"
+            attrs["days"] = sm.get("days") or ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+            attrs["mode"] = sm.get("mode") or "Restricted"
+            attrs["in_school_mode"] = get_child_school_mode_end_time(data) is not None
+            attrs["operating_mode"] = get_child_operating_mode(data)
         return attrs
 
     @property

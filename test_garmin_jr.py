@@ -50,6 +50,7 @@ for mod in [
     "homeassistant.components",
     "homeassistant.components.sensor",
     "homeassistant.components.device_tracker",
+    "homeassistant.components.switch",
     "homeassistant.util",
     "homeassistant.util.dt",
     "voluptuous",
@@ -80,6 +81,9 @@ ha_sensor.SensorEntity = type("SensorEntity", (), {})
 ha_sensor.SensorDeviceClass = type("SensorDeviceClass", (), {"DURATION": "duration", "BATTERY": "battery", "TIMESTAMP": "timestamp"})
 ha_sensor.SensorStateClass = type("SensorStateClass", (), {"TOTAL_INCREASING": "total_increasing", "MEASUREMENT": "measurement"})
 
+ha_switch = sys.modules["homeassistant.components.switch"]
+ha_switch.SwitchEntity = type("SwitchEntity", (), {})
+
 ha_const = sys.modules["homeassistant.const"]
 ha_const.PERCENTAGE = "%"
 ha_const.UnitOfTime = type("UnitOfTime", (), {"MINUTES": "min"})
@@ -89,7 +93,11 @@ ha_tracker.TrackerEntity = type("TrackerEntity", (), {})
 ha_tracker.SourceType = type("SourceType", (), {"GPS": "gps"})
 
 ha_coord = sys.modules["homeassistant.helpers.update_coordinator"]
-ha_coord.CoordinatorEntity = type("CoordinatorEntity", (object,), {"__class_getitem__": lambda cls, item: cls})
+ha_coord.CoordinatorEntity = type("CoordinatorEntity", (object,), {
+    "__class_getitem__": lambda cls, item: cls,
+    "__init__": lambda self, coordinator: setattr(self, "coordinator", coordinator),
+    "async_write_ha_state": lambda self: None,
+})
 ha_coord.DataUpdateCoordinator = type("DataUpdateCoordinator", (object,), {"__class_getitem__": lambda cls, item: cls})
 ha_coord.UpdateFailed = type("UpdateFailed", (Exception,), {})
 
@@ -484,6 +492,80 @@ class TestGarminJrClient(unittest.TestCase):
         fallback_chat = bridge._fallback_handler("Bonjour !", "15839246", "Benjamin", kid_data, session)
         self.assertEqual(fallback_chat, "Message bien reçu! 👍")
         print("  [OK] Strix Halo AI Bridge multi-turn context and action dispatching verified!")
+
+    def test_school_mode_schedule_and_switch(self):
+        """Test dynamic school mode detection, holiday bypass, dismissal calculation, and switch."""
+        import datetime
+        from custom_components.garmin_jr.coordinator import (
+            get_child_school_mode_end_time,
+            get_child_operating_mode,
+        )
+        from custom_components.garmin_jr.switch import GarminJrSchoolModeSwitch
+        from custom_components.garmin_jr.sensor import GarminJrSensorEntity
+
+        # 1. Active School Day during School Hours (e.g. Tuesday at 10:00 AM)
+        tue_10am = datetime.datetime(2026, 9, 1, 10, 0, 0)  # Sep 1 2026 is Tuesday (weekday=1)
+        active_child = {
+            "school_mode": {
+                "mode": "Restricted",
+                "startTime": "08:00",
+                "endTime": "15:00",
+                "days": ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"],
+            }
+        }
+        end_dt = get_child_school_mode_end_time(active_child, tue_10am)
+        self.assertIsNotNone(end_dt)
+        self.assertEqual(end_dt.hour, 15)
+        self.assertEqual(end_dt.minute, 0)
+        self.assertEqual(get_child_operating_mode(active_child, tue_10am), "school_mode")
+
+        # 2. Dismissal after school hours (e.g. Tuesday at 3:05 PM / 15:05)
+        tue_305pm = datetime.datetime(2026, 9, 1, 15, 5, 0)
+        end_after = get_child_school_mode_end_time(active_child, tue_305pm)
+        self.assertIsNone(end_after)
+        self.assertEqual(get_child_operating_mode(active_child, tue_305pm), "active")
+
+        # 3. Holiday / Vacation Mode: mode == 'Off'
+        holiday_child = {
+            "school_mode": {
+                "mode": "Off",
+                "startTime": "08:00",
+                "endTime": "15:00",
+                "days": ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"],
+            }
+        }
+        end_holiday = get_child_school_mode_end_time(holiday_child, tue_10am)
+        self.assertIsNone(end_holiday, "Holiday mode (Off) must NOT pause polling or enter school mode")
+        self.assertEqual(get_child_operating_mode(holiday_child, tue_10am), "active")
+
+        # 4. School Mode Switch Entity & Manual Override
+        mock_coordinator = MagicMock()
+        mock_coordinator.data = {"15839246": active_child}
+        mock_coordinator.config_entry.entry_id = "test_entry"
+
+        switch = GarminJrSchoolModeSwitch(mock_coordinator, "15839246")
+        self.assertTrue(switch.is_on)
+
+        # Toggle off for holiday
+        import asyncio
+        asyncio.run(switch.async_turn_off())
+        self.assertFalse(switch.is_on)
+        self.assertEqual(active_child["school_mode"]["mode"], "Off")
+        mock_coordinator.set_child_school_mode_override.assert_called_with("15839246", False)
+        mock_coordinator.reset_school_mode_pause.assert_called()
+
+        # Check attributes
+        attrs = switch.extra_state_attributes
+        self.assertEqual(attrs["start_time"], "08:00")
+        self.assertEqual(attrs["end_time"], "15:00")
+        self.assertEqual(attrs["mode"], "Off")
+        self.assertFalse(attrs["in_school_mode"])
+        self.assertTrue(attrs["holiday_override"])
+
+        # 5. School Mode Sensor Entity
+        sensor = GarminJrSensorEntity(mock_coordinator, "15839246", "school_mode")
+        self.assertEqual(sensor.native_value, "Off")
+        print("  [OK] Dynamic School Mode schedule, holiday toggle, and dismissal calculations verified!")
 
 
 if __name__ == "__main__":

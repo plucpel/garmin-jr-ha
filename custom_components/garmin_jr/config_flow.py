@@ -20,9 +20,14 @@ from .const import (
     CONF_MFA_CODE,
     CONF_PASSWORD,
     CONF_SCAN_INTERVAL,
+    CONF_SCHOOL_MODE_ENABLED,
+    CONF_SCHOOL_MODE_END_TIME,
+    CONF_SCHOOL_MODE_START_TIME,
     CONF_TOKENS,
     CONF_ZONE_MAPPING,
     DEFAULT_SCAN_INTERVAL,
+    DEFAULT_SCHOOL_MODE_END_TIME,
+    DEFAULT_SCHOOL_MODE_START_TIME,
     DOMAIN,
 )
 from .garmin_client import GarminJrAuthError, GarminJrClient, GarminJrConnectionError
@@ -246,6 +251,9 @@ class GarminJrOptionsFlowHandler(config_entries.OptionsFlow):
                 data={
                     CONF_SCAN_INTERVAL: scan_interval,
                     CONF_ZONE_MAPPING: zone_mapping,
+                    CONF_SCHOOL_MODE_ENABLED: user_input.get(CONF_SCHOOL_MODE_ENABLED, True),
+                    CONF_SCHOOL_MODE_START_TIME: user_input.get(CONF_SCHOOL_MODE_START_TIME, DEFAULT_SCHOOL_MODE_START_TIME),
+                    CONF_SCHOOL_MODE_END_TIME: user_input.get(CONF_SCHOOL_MODE_END_TIME, DEFAULT_SCHOOL_MODE_END_TIME),
                 },
             )
 
@@ -255,6 +263,18 @@ class GarminJrOptionsFlowHandler(config_entries.OptionsFlow):
         )
 
         saved_mapping = self.config_entry.options.get(CONF_ZONE_MAPPING, {})
+        current_school_enabled = self.config_entry.options.get(
+            CONF_SCHOOL_MODE_ENABLED,
+            self.config_entry.data.get(CONF_SCHOOL_MODE_ENABLED, True),
+        )
+        current_school_start = self.config_entry.options.get(
+            CONF_SCHOOL_MODE_START_TIME,
+            self.config_entry.data.get(CONF_SCHOOL_MODE_START_TIME, DEFAULT_SCHOOL_MODE_START_TIME),
+        )
+        current_school_end = self.config_entry.options.get(
+            CONF_SCHOOL_MODE_END_TIME,
+            self.config_entry.data.get(CONF_SCHOOL_MODE_END_TIME, DEFAULT_SCHOOL_MODE_END_TIME),
+        )
 
         # 2. Fetch available Home Assistant zones
         zone_options = [
@@ -281,6 +301,22 @@ class GarminJrOptionsFlowHandler(config_entries.OptionsFlow):
                     unit_of_measurement="seconds",
                     mode=selector.NumberSelectorMode.BOX,
                 )
+            ),
+            vol.Required(
+                CONF_SCHOOL_MODE_ENABLED,
+                default=current_school_enabled,
+            ): selector.BooleanSelector(),
+            vol.Required(
+                CONF_SCHOOL_MODE_START_TIME,
+                default=current_school_start,
+            ): selector.TextSelector(
+                selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
+            ),
+            vol.Required(
+                CONF_SCHOOL_MODE_END_TIME,
+                default=current_school_end,
+            ): selector.TextSelector(
+                selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
             ),
         }
 

@@ -26,10 +26,17 @@ CONF_IT_EXPIRES_AT = "it_expires_at"
 
 CONF_SCAN_INTERVAL = "scan_interval"
 CONF_ZONE_MAPPING = "zone_mapping"
+CONF_SCHOOL_MODE_ENABLED = "school_mode_enabled"
+CONF_SCHOOL_MODE_START_TIME = "school_mode_start_time"
+CONF_SCHOOL_MODE_END_TIME = "school_mode_end_time"
+CONF_SCHOOL_MODE_DAYS = "school_mode_days"
+
 DEFAULT_SCAN_INTERVAL = 300  # 5 minutes
 MIN_SCAN_INTERVAL = 60  # 1 minute
+DEFAULT_SCHOOL_MODE_START_TIME = "08:00"
+DEFAULT_SCHOOL_MODE_END_TIME = "15:00"
 
-PLATFORMS = ["device_tracker", "sensor"]
+PLATFORMS = ["device_tracker", "sensor", "switch"]
 
 # Events
 EVENT_MESSAGE_RECEIVED = "garmin_jr_message_received"
@@ -79,6 +86,9 @@ ATTR_MATCHED_HA_ZONE = "matched_ha_zone"
 ATTR_FIX_TYPE = "fix_type"
 ATTR_HAS_WIFI = "has_wifi"
 ATTR_GEOFENCES = "geofences"
+ATTR_SCHOOL_MODE = "school_mode"
+ATTR_IN_SCHOOL_MODE = "in_school_mode"
+ATTR_OPERATING_MODE = "operating_mode"
 
 
 

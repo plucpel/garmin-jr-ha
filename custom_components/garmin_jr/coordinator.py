@@ -19,8 +19,13 @@ from .const import (
     ATTR_CHILD_ID,
     ATTR_CHILD_NAME,
     CONF_SCAN_INTERVAL,
+    CONF_SCHOOL_MODE_ENABLED,
+    CONF_SCHOOL_MODE_END_TIME,
+    CONF_SCHOOL_MODE_START_TIME,
     CONF_TOKEN_DATA,
     DEFAULT_SCAN_INTERVAL,
+    DEFAULT_SCHOOL_MODE_END_TIME,
+    DEFAULT_SCHOOL_MODE_START_TIME,
     DOMAIN,
     EVENT_MESSAGE_RECEIVED,
     LOGGER,
@@ -31,18 +36,27 @@ FAST_MESSAGE_POLL_INTERVAL_SECONDS = 10
 
 
 def get_child_school_mode_end_time(
-    child_data: dict[str, Any], current_dt: datetime | None = None
+    child_data: dict[str, Any],
+    current_dt: datetime | None = None,
+    options: dict[str, Any] | None = None,
 ) -> datetime | None:
-    """If child is currently in an active school mode window derived from the watch, return the end datetime."""
+    """If child is currently in an active school mode window derived from the watch/config, return the end datetime."""
+    # Check manual override for holiday / vacation
+    if child_data.get("school_mode_override") is False:
+        return None
+
     settings = child_data.get("settings") or {}
     school_mode = child_data.get("school_mode") or settings.get("schoolMode") or settings.get("school_mode") or {}
 
-    # Strict check: school_mode MUST be explicitly enabled on the watch
+    # Strict check: school_mode MUST be explicitly enabled on the watch / options
     mode_val = school_mode.get("mode") or school_mode.get("enabled")
     is_school_enabled = False
     if isinstance(mode_val, str) and mode_val.upper() in ("RESTRICTED", "SILENT", "ALL", "ON", "TRUE"):
         is_school_enabled = True
     elif isinstance(mode_val, bool) and mode_val:
+        is_school_enabled = True
+    elif mode_val is None and (options is None or options.get(CONF_SCHOOL_MODE_ENABLED, True)):
+        # Default enabled if not turned off
         is_school_enabled = True
 
     if not is_school_enabled:
@@ -60,8 +74,11 @@ def get_child_school_mode_end_time(
     if not is_school_day:
         return None
 
-    start_raw = school_mode.get("startTime") or school_mode.get("start_time") or "08:00"
-    end_raw = school_mode.get("endTime") or school_mode.get("end_time") or "15:30"
+    opt_start = options.get(CONF_SCHOOL_MODE_START_TIME) if options else None
+    opt_end = options.get(CONF_SCHOOL_MODE_END_TIME) if options else None
+
+    start_raw = school_mode.get("startTime") or school_mode.get("start_time") or opt_start or DEFAULT_SCHOOL_MODE_START_TIME
+    end_raw = school_mode.get("endTime") or school_mode.get("end_time") or opt_end or DEFAULT_SCHOOL_MODE_END_TIME
 
     try:
         if isinstance(start_raw, (int, float)):
@@ -154,6 +171,7 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
         self._unsub_msg_poll: CALLBACK_TYPE | None = None
         self._school_mode_pause_until: float = 0.0
         self._last_night_poll_ts: float = 0.0
+        self._school_mode_overrides: dict[str, bool] = {}
 
         scan_interval_seconds = entry.options.get(
             CONF_SCAN_INTERVAL,
@@ -166,6 +184,22 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
             name=f"{DOMAIN}_{entry.entry_id}",
             update_interval=timedelta(seconds=scan_interval_seconds),
         )
+
+    def set_child_school_mode_override(self, child_id: str, enabled: bool) -> None:
+        """Set a manual School Mode override for a child (e.g. for holiday/vacation)."""
+        self._school_mode_overrides[child_id] = enabled
+        if self.data and child_id in self.data:
+            self.data[child_id]["school_mode_override"] = enabled
+            if not enabled and "school_mode" in self.data[child_id] and isinstance(self.data[child_id]["school_mode"], dict):
+                self.data[child_id]["school_mode"]["mode"] = "Off"
+                self.data[child_id]["school_mode"]["enabled"] = False
+        if not enabled:
+            self.reset_school_mode_pause()
+
+    def reset_school_mode_pause(self) -> None:
+        """Immediately lift any active School Mode polling pause."""
+        self._school_mode_pause_until = 0.0
+        LOGGER.debug("Garmin Jr: School Mode polling pause reset")
 
     def async_start_message_polling(self) -> None:
         """Start the fast 10-second background message polling loop."""
@@ -197,12 +231,12 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
 
         local_now = dt_util.now()
 
-        # 2. Check if any child is currently in an active School Mode window derived from the watch
+        # 2. Check if any child is currently in an active School Mode window derived from the watch/config
         max_school_end_dt: datetime | None = None
         is_night_mode = False
 
         for child_id, child_data in self.data.items():
-            school_end = get_child_school_mode_end_time(child_data, local_now)
+            school_end = get_child_school_mode_end_time(child_data, local_now, self.entry.options)
             if school_end:
                 if max_school_end_dt is None or school_end > max_school_end_dt:
                     max_school_end_dt = school_end
@@ -327,6 +361,18 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
         """Fetch data from Garmin API in executor."""
         try:
             data = await self.hass.async_add_executor_job(self.client.fetch_all_data)
+
+            # Apply any active manual overrides (e.g. for holiday/vacation)
+            for cid, override in self._school_mode_overrides.items():
+                if cid in data:
+                    data[cid]["school_mode_override"] = override
+                    if not override and "school_mode" in data[cid] and isinstance(data[cid]["school_mode"], dict):
+                        data[cid]["school_mode"]["mode"] = "Off"
+                        data[cid]["school_mode"]["enabled"] = False
+                    elif override and "school_mode" in data[cid] and isinstance(data[cid]["school_mode"], dict):
+                        if data[cid]["school_mode"].get("mode") == "Off":
+                            data[cid]["school_mode"]["mode"] = "Restricted"
+                            data[cid]["school_mode"]["enabled"] = True
 
             # Persist updated token data if changed
             current_tokens = self.client.get_token_data()
