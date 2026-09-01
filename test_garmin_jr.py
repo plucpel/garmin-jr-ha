@@ -50,12 +50,17 @@ for mod in [
     "homeassistant.components",
     "homeassistant.components.sensor",
     "homeassistant.components.device_tracker",
+    "homeassistant.util",
+    "homeassistant.util.dt",
     "voluptuous",
 ]:
     if mod not in sys.modules:
         m = types.ModuleType(mod)
         m.__path__ = []
         sys.modules[mod] = m
+
+import datetime as _dt
+sys.modules["homeassistant.util.dt"].now = lambda *args, **kwargs: _dt.datetime.now()
 
 sys.modules["homeassistant.helpers.event"].async_track_time_interval = lambda *args, **kwargs: (lambda: None)
 sys.modules["homeassistant.core"].CALLBACK_TYPE = Any

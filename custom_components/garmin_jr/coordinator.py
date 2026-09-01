@@ -1,7 +1,7 @@
 """DataUpdateCoordinator for Garmin Jr."""
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 import json
 import logging
 import os
@@ -13,6 +13,7 @@ from homeassistant.core import CALLBACK_TYPE, HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .const import (
     ATTR_CHILD_ID,
@@ -29,15 +30,14 @@ from .garmin_client import GarminJrAuthError, GarminJrClient, GarminJrConnection
 FAST_MESSAGE_POLL_INTERVAL_SECONDS = 10
 
 
-def get_child_operating_mode(child_data: dict[str, Any], current_dt: Any = None) -> str:
-    """Check if child is in School Mode, Sleep Time, or Active derived strictly from watch settings.
-
-    Returns: 'school_mode', 'sleep_time', or 'active'.
-    """
+def get_child_school_mode_end_time(
+    child_data: dict[str, Any], current_dt: datetime | None = None
+) -> datetime | None:
+    """If child is currently in an active school mode window derived from the watch, return the end datetime."""
     settings = child_data.get("settings") or {}
     school_mode = child_data.get("school_mode") or settings.get("schoolMode") or settings.get("school_mode") or {}
 
-    # 1. Strict School Mode check: must be explicitly configured and enabled on the watch
+    # Strict check: school_mode MUST be explicitly enabled on the watch
     mode_val = school_mode.get("mode") or school_mode.get("enabled")
     is_school_enabled = False
     if isinstance(mode_val, str) and mode_val.upper() in ("RESTRICTED", "SILENT", "ALL", "ON", "TRUE"):
@@ -45,33 +45,60 @@ def get_child_operating_mode(child_data: dict[str, Any], current_dt: Any = None)
     elif isinstance(mode_val, bool) and mode_val:
         is_school_enabled = True
 
-    if is_school_enabled:
-        import datetime
-        if current_dt is None:
-            current_dt = datetime.datetime.now()
+    if not is_school_enabled:
+        return None
 
-        current_weekday = current_dt.weekday()  # 0-4 = Mon-Fri
-        school_days = school_mode.get("days") or []
+    if current_dt is None:
+        current_dt = dt_util.now()
 
-        start_str = school_mode.get("startTime") or school_mode.get("start_time")
-        end_str = school_mode.get("endTime") or school_mode.get("end_time")
+    current_weekday = current_dt.weekday()  # 0-4 = Mon-Fri
+    school_days = school_mode.get("days") or ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"]
+    day_names = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"]
+    today_name = day_names[current_weekday]
 
-        if start_str and end_str:
-            try:
-                start_h, start_m = map(int, str(start_str).split(":")[:2])
-                end_h, end_m = map(int, str(end_str).split(":")[:2])
-                start_minutes = start_h * 60 + start_m
-                end_minutes = end_h * 60 + end_m
-                now_minutes = current_dt.hour * 60 + current_dt.minute
+    is_school_day = today_name in [str(d).upper() for d in school_days] or (current_weekday < 5 and not school_mode.get("days"))
+    if not is_school_day:
+        return None
 
-                day_names = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"]
-                today_name = day_names[current_weekday]
+    start_raw = school_mode.get("startTime") or school_mode.get("start_time") or "08:00"
+    end_raw = school_mode.get("endTime") or school_mode.get("end_time") or "15:30"
 
-                is_school_day = today_name in [str(d).upper() for d in school_days] or (current_weekday < 5 and not school_days)
-                if is_school_day and start_minutes <= now_minutes < end_minutes:
-                    return "school_mode"
-            except Exception:
-                pass
+    try:
+        if isinstance(start_raw, (int, float)):
+            start_h = int(start_raw // 3600)
+            start_m = int((start_raw % 3600) // 60)
+        else:
+            start_h, start_m = map(int, str(start_raw).split(":")[:2])
+
+        if isinstance(end_raw, (int, float)):
+            end_h = int(end_raw // 3600)
+            end_m = int((end_raw % 3600) // 60)
+        else:
+            end_h, end_m = map(int, str(end_raw).split(":")[:2])
+
+        start_dt = current_dt.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
+        end_dt = current_dt.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
+
+        if start_dt <= current_dt < end_dt:
+            return end_dt
+    except Exception as err:
+        LOGGER.debug("Error parsing school mode times: %s", err)
+
+    return None
+
+
+def get_child_operating_mode(child_data: dict[str, Any], current_dt: Any = None) -> str:
+    """Check if child is in School Mode, Sleep Time, or Active derived strictly from watch settings.
+
+    Returns: 'school_mode', 'sleep_time', or 'active'.
+    """
+    if current_dt is None:
+        current_dt = dt_util.now()
+
+    if get_child_school_mode_end_time(child_data, current_dt) is not None:
+        return "school_mode"
+
+    settings = child_data.get("settings") or {}
 
     # 2. Bedtime / Wake time window
     bed_time = child_data.get("bed_time") or settings.get("bedTime") or settings.get("bed_time")
@@ -90,9 +117,6 @@ def get_child_operating_mode(child_data: dict[str, Any], current_dt: Any = None)
                 wake_h, wake_m = map(int, str(wake_time).split(":")[:2])
                 wake_mins = wake_h * 60 + wake_m
 
-            if current_dt is None:
-                import datetime
-                current_dt = datetime.datetime.now()
             now_mins = current_dt.hour * 60 + current_dt.minute
 
             if bed_mins > wake_mins:
@@ -128,6 +152,7 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
         self._seen_message_ids: set[str] = set()
         self._initial_fetch_done: bool = False
         self._unsub_msg_poll: CALLBACK_TYPE | None = None
+        self._school_mode_pause_until: float = 0.0
         self._last_night_poll_ts: float = 0.0
 
         scan_interval_seconds = entry.options.get(
@@ -160,10 +185,48 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
             LOGGER.debug("Stopped Garmin Jr fast message polling timer")
 
     async def _async_poll_messages(self, _now: Any = None) -> None:
-        """Poll for messages continuously every 10 seconds."""
+        """Adaptive poll for messages: pause until school ends in School Mode, 60s in Night Mode, 10s Active."""
         if not self.data or not self._initial_fetch_done:
             return
 
+        now_ts = time.time()
+
+        # 1. Check if we are currently paused due to active School Mode on watch
+        if now_ts < self._school_mode_pause_until:
+            return
+
+        local_now = dt_util.now()
+
+        # 2. Check if any child is currently in an active School Mode window derived from the watch
+        max_school_end_dt: datetime | None = None
+        is_night_mode = False
+
+        for child_id, child_data in self.data.items():
+            school_end = get_child_school_mode_end_time(child_data, local_now)
+            if school_end:
+                if max_school_end_dt is None or school_end > max_school_end_dt:
+                    max_school_end_dt = school_end
+            elif get_child_operating_mode(child_data, local_now) == "sleep_time":
+                is_night_mode = True
+
+        if max_school_end_dt and max_school_end_dt > local_now:
+            pause_seconds = (max_school_end_dt - local_now).total_seconds() + 5  # 5s safety margin
+            self._school_mode_pause_until = now_ts + pause_seconds
+            LOGGER.info(
+                "Garmin Jr: Watch in School Mode until %s. Pausing message polling for %d seconds",
+                max_school_end_dt.strftime("%H:%M:%S"),
+                int(pause_seconds),
+            )
+            return
+
+        # 3. Night Mode (Sleep Time): Relax polling to 60s
+        if is_night_mode:
+            if (now_ts - self._last_night_poll_ts) < 60:
+                return
+            self._last_night_poll_ts = now_ts
+            LOGGER.debug("Garmin Jr: Night mode active - polling at relaxed 60s interval")
+
+        # 4. Active: Poll messages
         try:
             recent_messages = await self.hass.async_add_executor_job(
                 self.client.fetch_messages, None, 15
