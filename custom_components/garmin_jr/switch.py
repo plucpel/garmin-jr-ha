@@ -20,6 +20,7 @@ from .const import (
 )
 from .coordinator import (
     GarminJrDataUpdateCoordinator,
+    format_time_str,
     get_child_operating_mode,
     get_child_school_mode_end_time,
 )
@@ -136,8 +137,8 @@ class GarminJrSchoolModeSwitch(
         settings = child_data.get("settings") or {}
         school_mode = child_data.get("school_mode") or settings.get("schoolMode") or settings.get("school_mode") or {}
 
-        start_time = school_mode.get("startTime") or school_mode.get("start_time") or "08:00"
-        end_time = school_mode.get("endTime") or school_mode.get("end_time") or "15:00"
+        start_time = format_time_str(school_mode.get("startTime") or school_mode.get("start_time") or "08:00")
+        end_time = format_time_str(school_mode.get("endTime") or school_mode.get("end_time") or "15:00")
         days = school_mode.get("days") or ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
         mode = "Off" if not self.is_on else (school_mode.get("mode") or "Restricted")
 
@@ -147,6 +148,8 @@ class GarminJrSchoolModeSwitch(
         return {
             "start_time": start_time,
             "end_time": end_time,
+            "start_time_seconds": school_mode.get("startTime"),
+            "end_time_seconds": school_mode.get("endTime"),
             "days": days,
             "mode": mode,
             "in_school_mode": in_school,

@@ -35,6 +35,15 @@ from .garmin_client import GarminJrAuthError, GarminJrClient, GarminJrConnection
 FAST_MESSAGE_POLL_INTERVAL_SECONDS = 10
 
 
+def format_time_str(time_val: Any) -> str:
+    """Format seconds from midnight or HH:MM string to HH:MM format."""
+    if isinstance(time_val, (int, float)):
+        h = int(time_val // 3600)
+        m = int((time_val % 3600) // 60)
+        return f"{h:02d}:{m:02d}"
+    return str(time_val or "")
+
+
 def get_child_school_mode_end_time(
     child_data: dict[str, Any],
     current_dt: datetime | None = None,

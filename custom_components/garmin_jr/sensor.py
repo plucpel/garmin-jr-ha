@@ -44,6 +44,7 @@ from .const import (
 )
 from .coordinator import (
     GarminJrDataUpdateCoordinator,
+    format_time_str,
     get_child_operating_mode,
     get_child_school_mode_end_time,
 )
@@ -257,8 +258,10 @@ class GarminJrSensorEntity(
             attrs["fix_type"] = data.get(ATTR_FIX_TYPE)
         elif self.sensor_type == "school_mode":
             sm = data.get("school_mode") or {}
-            attrs["start_time"] = sm.get("startTime") or sm.get("start_time") or "08:00"
-            attrs["end_time"] = sm.get("endTime") or sm.get("end_time") or "15:00"
+            attrs["start_time"] = format_time_str(sm.get("startTime") or sm.get("start_time") or "08:00")
+            attrs["end_time"] = format_time_str(sm.get("endTime") or sm.get("end_time") or "15:00")
+            attrs["start_time_seconds"] = sm.get("startTime")
+            attrs["end_time_seconds"] = sm.get("endTime")
             attrs["days"] = sm.get("days") or ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
             attrs["mode"] = sm.get("mode") or "Restricted"
             attrs["in_school_mode"] = get_child_school_mode_end_time(data) is not None

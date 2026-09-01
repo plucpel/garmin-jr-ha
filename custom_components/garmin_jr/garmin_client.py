@@ -55,6 +55,7 @@ class GarminJrClient:
         self._it_refresh_token: str | None = None
         self._it_expires_at: float | None = None
         self._last_seen_message_ids: set[str] = set()
+        self._kid_diauth_tokens: dict[str, dict[str, Any]] = {}
 
         if token_data:
             self._load_token_data(token_data)
@@ -174,6 +175,69 @@ class GarminJrClient:
             _LOGGER.warning("Exception during diauth token exchange: %s", err)
 
         return None
+
+    def _get_kid_diauth_token(self, kid_connect_id: str | int) -> str | None:
+        """Exchange parent DI token for child-specific DiOAuth token to query device settings."""
+        cid = str(kid_connect_id)
+        now = time.time()
+        cached = self._kid_diauth_tokens.get(cid)
+        if cached and (now + 300) < cached.get("expires_at", 0):
+            return cached.get("token")
+
+        parent_di = self._ensure_diauth_token()
+        if not parent_di:
+            return None
+
+        try:
+            url = "https://diauth.garmin.com/di-oauth2-service/oauth/token"
+            data = {
+                "grant_type": "https://connectapi.garmin.com/di-oauth2-service/oauth/grant/gc_kid",
+                "access_token": parent_di,
+                "gc_kid_id": int(cid),
+                "client_id": "VIVOFIT_JR_ANDROID",
+            }
+            resp = requests.post(url, data=data, timeout=15)
+            if resp.status_code == 200:
+                res_data = resp.json()
+                kid_token = res_data.get("access_token")
+                expires_in = res_data.get("expires_in", 21600)
+                self._kid_diauth_tokens[cid] = {
+                    "token": kid_token,
+                    "expires_at": now + expires_in,
+                }
+                _LOGGER.debug("Exchanged kid DiOAuth token for connectId %s successfully", cid)
+                return kid_token
+            else:
+                _LOGGER.debug("Kid DiOAuth exchange returned HTTP %s for connectId %s: %s", resp.status_code, cid, resp.text)
+        except Exception as err:
+            _LOGGER.debug("Exception during kid DiOAuth exchange for %s: %s", cid, err)
+
+        return None
+
+    def fetch_kid_device_settings(self, kid_connect_id: str | int, device_id: str | int) -> dict[str, Any]:
+        """Fetch child's live DeviceSettings / SchoolMode from Garmin connectapi."""
+        kid_token = self._get_kid_diauth_token(kid_connect_id)
+        if not kid_token:
+            return {}
+
+        try:
+            url = f"https://connectapi.garmin.com/device-service/deviceservice/device-info/settings/{device_id}"
+            headers = {
+                "Authorization": f"Bearer {kid_token}",
+                "User-Agent": "Vivokid 7.5 245",
+                "Accept": "application/json",
+            }
+            resp = requests.get(url, headers=headers, timeout=15)
+            if resp.status_code == 200:
+                settings = resp.json()
+                _LOGGER.debug("Fetched live kid device settings for device %s: %s", device_id, settings.get("schoolMode"))
+                return settings
+            else:
+                _LOGGER.debug("Fetch kid device settings returned HTTP %s for device %s: %s", resp.status_code, device_id, resp.text)
+        except Exception as err:
+            _LOGGER.debug("Exception fetching kid device settings for %s: %s", device_id, err)
+
+        return {}
 
     def _ensure_it_token(self) -> None:
         """Ensure a valid IT token exists, exchanging via connectToIT or refreshing."""
@@ -575,15 +639,20 @@ class GarminJrClient:
                     k_id = str(k.get("id"))
                     # connectId is used by the GCS tracker API as kidProfileId
                     connect_id = k.get("connectId") or k.get("account", {}).get("connectId")
+                    device_id = k.get("deviceId")
+                    device_settings: dict[str, Any] = {}
+                    if connect_id and device_id:
+                        device_settings = self.fetch_kid_device_settings(connect_id, device_id)
+
                     kids_map[k_id] = {
                         "id": k_id,
                         "connectId": connect_id,
                         "displayName": k.get("name") or "Child",
-                        "deviceId": k.get("deviceId"),
+                        "deviceId": device_id,
                         "hasLteDevice": k.get("hasLteDevice", True),
                         "totalPoints": k.get("totalPoints"),
-                        "settings": k.get("settings") or {},
-                        "school_mode": k.get("schoolMode") or (k.get("settings") or {}).get("schoolMode") or {},
+                        "settings": device_settings or k.get("settings") or {},
+                        "school_mode": device_settings.get("schoolMode") or k.get("schoolMode") or (k.get("settings") or {}).get("schoolMode") or {},
                         "bed_time": k.get("bedTime") or (k.get("settings") or {}).get("bedTime"),
                         "wake_time": k.get("wakeTime") or (k.get("settings") or {}).get("wakeTime"),
                         "dnd_settings": k.get("dndSettings") or (k.get("settings") or {}).get("dndSettings") or {},
