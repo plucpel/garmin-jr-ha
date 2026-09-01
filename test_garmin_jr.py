@@ -430,9 +430,11 @@ class TestGarminJrClient(unittest.TestCase):
         loc_info = {"latitude": user_lat, "longitude": user_lon, "zone_name": "Home"}
         msg = format_bounce_response(enriched, loc_info, language="fr")
         self.assertIn("Air Canada", msg)
-        self.assertIn("ACA890", msg)
+        self.assertIn("890", msg)
+        self.assertIn("Airbus A220-300", msg)
+        self.assertIn("🛫", msg)
         self.assertLess(len(msg), 140)
-        print("  [OK] Plane spotting filter, enrichment, and Bounce watch formatting verified!")
+        print("  [OK] Plane spotting filter, route enrichment, and Bounce watch formatting verified!")
 
 if __name__ == "__main__":
     unittest.main()

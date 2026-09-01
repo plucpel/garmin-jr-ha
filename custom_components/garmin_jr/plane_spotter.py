@@ -60,6 +60,7 @@ AIRCRAFT_TYPE_MAPPING: dict[str, str] = {
     "B763": "Boeing 767-300",
     "B764": "Boeing 767-400",
     "B752": "Boeing 757-200",
+    "B753": "Boeing 757-300",
     "B737": "Boeing 737-700",
     "B738": "Boeing 737-800",
     "B739": "Boeing 737-900",
@@ -90,9 +91,15 @@ AIRCRAFT_TYPE_MAPPING: dict[str, str] = {
     "E190": "Embraer E190",
     "E195": "Embraer E195",
     "E75L": "Embraer E175",
+    "E75S": "Embraer E175",
+    "E290": "Embraer E190-E2",
+    "E295": "Embraer E195-E2",
+    "E170": "Embraer E170",
+    "E145": "Embraer ERJ-145",
     "CRJ9": "Bombardier CRJ-900",
     "CRJ7": "Bombardier CRJ-700",
     "CRJ2": "Bombardier CRJ-200",
+    "CRJ1": "Bombardier CRJ-100",
     "CL35": "Bombardier Challenger 350",
     "CL60": "Bombardier Challenger 600",
     "GL5T": "Bombardier Global 5000",
@@ -102,12 +109,128 @@ AIRCRAFT_TYPE_MAPPING: dict[str, str] = {
     "C172": "Cessna 172 Skyhawk",
     "C182": "Cessna 182 Skylane",
     "C208": "Cessna Caravan",
+    "C510": "Cessna Citation Mustang",
+    "C525": "Cessna CitationJet",
+    "C560": "Cessna Citation Excel",
+    "C680": "Cessna Citation Sovereign",
     "PA28": "Piper Cherokee",
+    "PA34": "Piper Seneca",
+    "PA31": "Piper Navajo",
+    "BE20": "Beechcraft King Air 200",
+    "B350": "Beechcraft King Air 350",
+    "BE36": "Beechcraft Bonanza",
+    "BE58": "Beechcraft Baron",
+    "DA40": "Diamond DA40 Star",
+    "DA42": "Diamond DA42 Twin Star",
+    "DA62": "Diamond DA62",
+    "SR20": "Cirrus SR20",
+    "SR22": "Cirrus SR22",
+    "SF50": "Cirrus Vision Jet",
+    "GLF4": "Gulfstream IV",
+    "GLF5": "Gulfstream V",
+    "GLF6": "Gulfstream G650",
+    "FA7X": "Dassault Falcon 7X",
+    "FA8X": "Dassault Falcon 8X",
+    "F2TH": "Dassault Falcon 2000",
     "C17": "Boeing C-17 Globemaster III",
     "C130": "Lockheed C-130 Hercules",
     "CC130": "Lockheed CC-130 Hercules",
     "A400": "Airbus A400M Atlas",
+    "B06": "Bell 206 JetRanger",
+    "B429": "Bell 429",
+    "EC35": "Eurocopter EC135",
+    "EC45": "Eurocopter EC145",
 }
+
+# French translation for common international origin/destination cities
+FRENCH_CITY_TRANSLATIONS: dict[str, str] = {
+    "London": "Londres",
+    "Rome": "Rome",
+    "Paris": "Paris",
+    "Athens": "Athènes",
+    "Vienna": "Vienne",
+    "Brussels": "Bruxelles",
+    "Geneva": "Genève",
+    "Lisbon": "Lisbonne",
+    "Munich": "Munich",
+    "Warsaw": "Varsovie",
+    "Copenhagen": "Copenhague",
+    "Frankfurt": "Francfort",
+    "Milan": "Milan",
+    "Venice": "Venise",
+    "Florence": "Florence",
+    "Naples": "Naples",
+    "Seville": "Séville",
+    "Edinburgh": "Édimbourg",
+    "Dublin": "Dublin",
+    "Tokyo": "Tokyo",
+    "Beijing": "Pékin",
+    "Algiers": "Alger",
+    "Cairo": "Le Caire",
+    "Doha": "Doha",
+    "Dubai": "Dubaï",
+    "Beirut": "Beyrouth",
+    "Havana": "La Havane",
+}
+
+
+def translate_city(city: str, language: str = "fr") -> str:
+    """Translate common city names to French if applicable."""
+    if not city or language != "fr":
+        return city
+    return FRENCH_CITY_TRANSLATIONS.get(city, city)
+
+
+def fetch_flight_route(callsign: str, language: str = "fr") -> dict[str, Any]:
+    """Fetch flight route (origin and destination) and airline from ADS-B DB."""
+    if not callsign or len(callsign) < 3:
+        return {}
+    clean_callsign = callsign.strip().upper()
+    try:
+        url = f"https://api.adsbdb.com/v0/callsign/{clean_callsign}"
+        resp = requests.get(url, timeout=2.5)
+        if resp.status_code == 200:
+            data = resp.json().get("response", {}).get("flightroute", {})
+            orig = data.get("origin", {})
+            dest = data.get("destination", {})
+            airline = data.get("airline", {})
+            orig_city = orig.get("municipality") or orig.get("name")
+            dest_city = dest.get("municipality") or dest.get("name")
+            if orig_city and dest_city:
+                orig_fr = translate_city(orig_city, language=language)
+                dest_fr = translate_city(dest_city, language=language)
+                orig_iata = orig.get("iata_code")
+                dest_iata = dest.get("iata_code")
+                return {
+                    "origin_city": orig_fr,
+                    "origin_iata": orig_iata,
+                    "destination_city": dest_fr,
+                    "destination_iata": dest_iata,
+                    "airline_name": airline.get("name"),
+                    "callsign_iata": data.get("callsign_iata"),
+                }
+    except Exception as err:
+        _LOGGER.debug("Could not fetch flight route for %s: %s", clean_callsign, err)
+    return {}
+
+
+def fetch_aircraft_details(icao24: str) -> dict[str, Any]:
+    """Fetch aircraft make and model from ADS-B DB if not in static table."""
+    if not icao24:
+        return {}
+    try:
+        url = f"https://api.adsbdb.com/v0/aircraft/{icao24.strip().lower()}"
+        resp = requests.get(url, timeout=2.0)
+        if resp.status_code == 200:
+            data = resp.json().get("response", {}).get("aircraft", {})
+            return {
+                "manufacturer": data.get("manufacturer"),
+                "type": data.get("type"),
+                "icao_type": data.get("icao_type"),
+            }
+    except Exception as err:
+        _LOGGER.debug("Could not fetch aircraft details for %s: %s", icao24, err)
+    return {}
 
 
 def haversine_bearing_elevation(
@@ -356,13 +479,19 @@ def filter_and_rank_planes(
 
 
 def enrich_flight_details(aircraft: dict[str, Any], language: str = "fr") -> dict[str, Any]:
-    """Enrich flight with airline name, model name, and cardinal directions."""
+    """Enrich flight with route (origin/destination), airline, make/model, and cardinal directions."""
     callsign = aircraft.get("callsign", "")
     type_code = aircraft.get("type_code", "")
+    icao24 = aircraft.get("icao24", "")
 
-    # 1. Resolve Airline from Callsign prefix (3 chars)
-    airline = "Privé / Inconnu" if language == "fr" else "Private / Unknown"
-    if len(callsign) >= 3:
+    # 1. Fetch live route information (Origin ➔ Destination)
+    route_info = fetch_flight_route(callsign, language=language) if callsign else {}
+
+    # 2. Resolve Airline
+    airline = None
+    if route_info.get("airline_name"):
+        airline = route_info["airline_name"]
+    elif len(callsign) >= 3:
         prefix = callsign[:3].upper()
         if prefix in AIRLINE_MAPPING:
             airline = AIRLINE_MAPPING[prefix]
@@ -371,8 +500,20 @@ def enrich_flight_details(aircraft: dict[str, Any], language: str = "fr") -> dic
         elif callsign.startswith("N"):
             airline = "Avion civil américain" if language == "fr" else "US Civil Aircraft"
 
-    # 2. Resolve Aircraft Type
+    if not airline:
+        airline = "Privé / Inconnu" if language == "fr" else "Private / Unknown"
+
+    # 3. Resolve Specific Make / Model
     model_name = AIRCRAFT_TYPE_MAPPING.get(type_code.upper(), "") if type_code else ""
+    if not model_name and icao24:
+        ac_details = fetch_aircraft_details(icao24)
+        mfg = ac_details.get("manufacturer")
+        m_type = ac_details.get("type")
+        if mfg and m_type:
+            model_name = f"{mfg} {m_type}".strip()
+        elif m_type:
+            model_name = m_type.strip()
+
     if not model_name:
         if aircraft.get("altitude_ft", 0) > 25000:
             model_name = "Avion de ligne (Gros porteur)" if language == "fr" else "Commercial Jetliner"
@@ -381,11 +522,26 @@ def enrich_flight_details(aircraft: dict[str, Any], language: str = "fr") -> dic
         else:
             model_name = "Avion léger / Hélice" if language == "fr" else "Light Aircraft"
 
+    # 4. Format Route
+    route_str = None
+    if route_info.get("origin_city") and route_info.get("destination_city"):
+        orig = route_info["origin_city"]
+        dest = route_info["destination_city"]
+        orig_iata = route_info.get("origin_iata")
+        dest_iata = route_info.get("destination_iata")
+        if orig_iata and dest_iata:
+            route_str = f"{orig} ({orig_iata}) ➔ {dest} ({dest_iata})"
+        else:
+            route_str = f"{orig} ➔ {dest}"
+
     cardinal = bearing_to_cardinal(aircraft.get("bearing_deg", 0.0), language=language)
 
     enriched = dict(aircraft)
     enriched["airline"] = airline
     enriched["model_name"] = model_name
+    enriched["route"] = route_str
+    enriched["route_info"] = route_info
+    enriched["callsign_iata"] = route_info.get("callsign_iata")
     enriched["cardinal_direction"] = cardinal
 
     return enriched
@@ -402,28 +558,40 @@ def format_bounce_response(
             return "🔭 Aucun avion visible au-dessus de toi en ce moment! Regarde à nouveau dans quelques minutes!"
         return "🔭 No planes visible directly overhead right now! Check back in a few minutes!"
 
-    callsign = flight_data.get("callsign") or flight_data.get("icao24", "Inconnu")
+    callsign = flight_data.get("callsign_iata") or flight_data.get("callsign") or flight_data.get("icao24", "Inconnu")
     airline = flight_data.get("airline", "")
     model = flight_data.get("model_name", "")
+    route = flight_data.get("route")
     cardinal = flight_data.get("cardinal_direction", "")
     elevation = int(round(flight_data.get("elevation_deg", 0)))
     alt_ft = int(round(flight_data.get("altitude_ft", 0)))
 
     if language == "fr":
         elev_desc = "très haut" if elevation >= 45 else ("haut" if elevation >= 25 else "au loin")
-        lines = [
-            f"✈️ {airline} ({callsign})",
-            f"🧭 Regarde vers le {cardinal} ({elev_desc}, {elevation}°)",
-            f"🛩️ {model}",
-            f"☁️ {alt_ft:,} pi".replace(",", " "),
-        ]
+        alt_str = f"{alt_ft:,} pi".replace(",", " ")
+        lines = [f"✈️ {airline} ({callsign})"]
+        if route:
+            lines.append(f"🛫 {route}")
+        if model:
+            lines.append(f"🛩️ {model}")
+        lines.append(f"🧭 {cardinal} ({elev_desc}, {elevation}°) • {alt_str}")
     else:
         elev_desc = "straight up" if elevation >= 45 else ("high" if elevation >= 25 else "low")
-        lines = [
-            f"✈️ {airline} ({callsign})",
-            f"🧭 Look {cardinal} ({elev_desc}, {elevation}°)",
-            f"🛩️ {model}",
-            f"☁️ {alt_ft:,} ft",
-        ]
+        lines = [f"✈️ {airline} ({callsign})"]
+        if route:
+            lines.append(f"🛫 {route}")
+        if model:
+            lines.append(f"🛩️ {model}")
+        lines.append(f"🧭 {cardinal} ({elev_desc}, {elevation}°) • {alt_ft:,} ft")
 
-    return "\n".join(lines)
+    msg = "\n".join(lines)
+    # If too long for Bounce screen (> 138 chars), compact route
+    if len(msg) > 138 and route and " (" in route:
+        orig_city = (flight_data.get("route_info") or {}).get("origin_city")
+        dest_city = (flight_data.get("route_info") or {}).get("destination_city")
+        if orig_city and dest_city:
+            compact_route = f"{orig_city} ➔ {dest_city}"
+            lines[1] = f"🛫 {compact_route}"
+            msg = "\n".join(lines)
+
+    return msg
