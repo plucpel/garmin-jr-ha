@@ -30,61 +30,81 @@ FAST_MESSAGE_POLL_INTERVAL_SECONDS = 10
 
 
 def get_child_operating_mode(child_data: dict[str, Any], current_dt: Any = None) -> str:
-    """Check if child is in School Mode, Sleep Time, or Active based strictly on watch settings.
+    """Check if child is in School Mode, Sleep Time, or Active derived strictly from watch settings.
 
     Returns: 'school_mode', 'sleep_time', or 'active'.
     """
-    import datetime
-    if current_dt is None:
-        current_dt = datetime.datetime.now()
-
     settings = child_data.get("settings") or {}
-
-    # 1. School Mode check (Watch is locked, time-only -> 0 message polling)
     school_mode = child_data.get("school_mode") or settings.get("schoolMode") or settings.get("school_mode") or {}
-    if school_mode.get("enabled", True):
+
+    # 1. Strict School Mode check: must be explicitly configured and enabled on the watch
+    mode_val = school_mode.get("mode") or school_mode.get("enabled")
+    is_school_enabled = False
+    if isinstance(mode_val, str) and mode_val.upper() in ("RESTRICTED", "SILENT", "ALL", "ON", "TRUE"):
+        is_school_enabled = True
+    elif isinstance(mode_val, bool) and mode_val:
+        is_school_enabled = True
+
+    if is_school_enabled:
+        import datetime
+        if current_dt is None:
+            current_dt = datetime.datetime.now()
+
         current_weekday = current_dt.weekday()  # 0-4 = Mon-Fri
-        school_days = school_mode.get("days") or ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"]
+        school_days = school_mode.get("days") or []
 
-        start_str = school_mode.get("startTime") or school_mode.get("start_time") or "08:00"
-        end_str = school_mode.get("endTime") or school_mode.get("end_time") or "15:30"
+        start_str = school_mode.get("startTime") or school_mode.get("start_time")
+        end_str = school_mode.get("endTime") or school_mode.get("end_time")
 
+        if start_str and end_str:
+            try:
+                start_h, start_m = map(int, str(start_str).split(":")[:2])
+                end_h, end_m = map(int, str(end_str).split(":")[:2])
+                start_minutes = start_h * 60 + start_m
+                end_minutes = end_h * 60 + end_m
+                now_minutes = current_dt.hour * 60 + current_dt.minute
+
+                day_names = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"]
+                today_name = day_names[current_weekday]
+
+                is_school_day = today_name in [str(d).upper() for d in school_days] or (current_weekday < 5 and not school_days)
+                if is_school_day and start_minutes <= now_minutes < end_minutes:
+                    return "school_mode"
+            except Exception:
+                pass
+
+    # 2. Bedtime / Wake time window
+    bed_time = child_data.get("bed_time") or settings.get("bedTime") or settings.get("bed_time")
+    wake_time = child_data.get("wake_time") or settings.get("wakeTime") or settings.get("wake_time")
+    if bed_time and wake_time:
         try:
-            start_h, start_m = map(int, str(start_str).split(":"))
-            end_h, end_m = map(int, str(end_str).split(":"))
-            start_minutes = start_h * 60 + start_m
-            end_minutes = end_h * 60 + end_m
-            now_minutes = current_dt.hour * 60 + current_dt.minute
+            if isinstance(bed_time, (int, float)):
+                bed_mins = int(bed_time / 60)
+            else:
+                bed_h, bed_m = map(int, str(bed_time).split(":")[:2])
+                bed_mins = bed_h * 60 + bed_m
 
-            day_names = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"]
-            today_name = day_names[current_weekday]
+            if isinstance(wake_time, (int, float)):
+                wake_mins = int(wake_time / 60)
+            else:
+                wake_h, wake_m = map(int, str(wake_time).split(":")[:2])
+                wake_mins = wake_h * 60 + wake_m
 
-            is_school_day = today_name in [str(d).upper() for d in school_days] or (current_weekday < 5 and not school_mode.get("days"))
-            if is_school_day and start_minutes <= now_minutes < end_minutes:
-                return "school_mode"
+            if current_dt is None:
+                import datetime
+                current_dt = datetime.datetime.now()
+            now_mins = current_dt.hour * 60 + current_dt.minute
+
+            if bed_mins > wake_mins:
+                if now_mins >= bed_mins or now_mins < wake_mins:
+                    return "sleep_time"
+            else:
+                if bed_mins <= now_mins < wake_mins:
+                    return "sleep_time"
         except Exception:
             pass
 
-    # 2. Bedtime / Wake time window (Child can message, but silent notifications -> 60s polling)
-    bed_time_str = child_data.get("bed_time") or settings.get("bedTime") or settings.get("bed_time") or "21:00"
-    wake_time_str = child_data.get("wake_time") or settings.get("wakeTime") or settings.get("wake_time") or "07:00"
-    try:
-        bed_h, bed_m = map(int, str(bed_time_str).split(":"))
-        wake_h, wake_m = map(int, str(wake_time_str).split(":"))
-        bed_mins = bed_h * 60 + bed_m
-        wake_mins = wake_h * 60 + wake_m
-        now_mins = current_dt.hour * 60 + current_dt.minute
-
-        if bed_mins > wake_mins:
-            if now_mins >= bed_mins or now_mins < wake_mins:
-                return "sleep_time"
-        else:
-            if bed_mins <= now_mins < wake_mins:
-                return "sleep_time"
-    except Exception:
-        pass
-
-    # 3. DND flag
+    # 3. DND flag from watch
     if settings.get("dndEnabled") or settings.get("dnd_enabled"):
         return "sleep_time"
 
