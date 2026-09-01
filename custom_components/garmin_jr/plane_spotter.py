@@ -11,8 +11,9 @@ import requests
 _LOGGER = logging.getLogger(__name__)
 
 # Primary ADS-B radar endpoints
-OPENSKY_API_URL = "https://opensky-network.org/api/states/all"
+ADSB_LOL_API_URL = "https://api.adsb.lol/v2/point"
 AIRPLANES_LIVE_URL = "https://api.airplanes.live/v2/point"
+OPENSKY_API_URL = "https://opensky-network.org/api/states/all"
 
 # Common Airline ICAO 3-letter prefix mapping
 AIRLINE_MAPPING: dict[str, str] = {
@@ -215,21 +216,87 @@ def fetch_flight_route(callsign: str, language: str = "fr") -> dict[str, Any]:
 
 
 def fetch_aircraft_details(icao24: str) -> dict[str, Any]:
-    """Fetch aircraft make and model from ADS-B DB if not in static table."""
+    """Fetch aircraft make and model from ADS-B hex databases."""
     if not icao24:
         return {}
+    clean_hex = icao24.strip().lower()
+
+    # 1. Query adsb.lol hex endpoint
     try:
-        url = f"https://api.adsbdb.com/v0/aircraft/{icao24.strip().lower()}"
+        url = f"https://api.adsb.lol/v2/hex/{clean_hex}"
+        resp = requests.get(url, timeout=2.0)
+        if resp.status_code == 200:
+            ac_list = resp.json().get("ac") or []
+            if ac_list:
+                ac = ac_list[0]
+                t_code = ac.get("t")
+                desc = ac.get("desc")
+                r_reg = ac.get("r")
+                own_op = ac.get("ownOp")
+                resolved_type = None
+                if t_code and t_code.upper() in AIRCRAFT_TYPE_MAPPING:
+                    resolved_type = AIRCRAFT_TYPE_MAPPING[t_code.upper()]
+                elif desc:
+                    resolved_type = desc.title()
+                if resolved_type or t_code:
+                    return {
+                        "type": resolved_type or t_code,
+                        "icao_type": t_code,
+                        "registration": r_reg,
+                        "operator": own_op,
+                    }
+    except Exception as err:
+        _LOGGER.debug("adsb.lol hex lookup error for %s: %s", clean_hex, err)
+
+    # 2. Query opendata.adsb.fi hex endpoint
+    try:
+        url = f"https://opendata.adsb.fi/api/v2/hex/{clean_hex}"
+        resp = requests.get(url, timeout=2.0)
+        if resp.status_code == 200:
+            ac_list = resp.json().get("ac") or []
+            if ac_list:
+                ac = ac_list[0]
+                t_code = ac.get("t")
+                desc = ac.get("desc")
+                r_reg = ac.get("r")
+                resolved_type = None
+                if t_code and t_code.upper() in AIRCRAFT_TYPE_MAPPING:
+                    resolved_type = AIRCRAFT_TYPE_MAPPING[t_code.upper()]
+                elif desc:
+                    resolved_type = desc.title()
+                if resolved_type or t_code:
+                    return {
+                        "type": resolved_type or t_code,
+                        "icao_type": t_code,
+                        "registration": r_reg,
+                    }
+    except Exception as err:
+        _LOGGER.debug("adsb.fi hex lookup error for %s: %s", clean_hex, err)
+
+    # 3. Query adsbdb.com
+    try:
+        url = f"https://api.adsbdb.com/v0/aircraft/{clean_hex}"
         resp = requests.get(url, timeout=2.0)
         if resp.status_code == 200:
             data = resp.json().get("response", {}).get("aircraft", {})
+            mfg = data.get("manufacturer")
+            m_type = data.get("type")
+            t_code = data.get("icao_type")
+            resolved = None
+            if t_code and t_code.upper() in AIRCRAFT_TYPE_MAPPING:
+                resolved = AIRCRAFT_TYPE_MAPPING[t_code.upper()]
+            elif mfg and m_type:
+                resolved = f"{mfg} {m_type}".strip()
+            elif m_type:
+                resolved = m_type.strip()
             return {
-                "manufacturer": data.get("manufacturer"),
-                "type": data.get("type"),
-                "icao_type": data.get("icao_type"),
+                "manufacturer": mfg,
+                "type": resolved or m_type,
+                "icao_type": t_code,
             }
     except Exception as err:
-        _LOGGER.debug("Could not fetch aircraft details for %s: %s", icao24, err)
+        _LOGGER.debug("adsbdb aircraft lookup error for %s: %s", clean_hex, err)
+
     return {}
 
 
@@ -367,11 +434,48 @@ def fetch_live_aircraft_sync(
     """Fetch live aircraft states around coordinates prioritizing fast ADS-B feeds."""
     aircraft: list[dict[str, Any]] = []
 
-    # 1. Try Airplanes.live first (fastest, type codes, registration, no rate-limits)
+    # 1. Try adsb.lol first (open, returns exact ICAO type codes, speeds, altitudes, registrations)
+    try:
+        nm_radius = max(5, int(radius_km * 0.539957))
+        url = f"{ADSB_LOL_API_URL}/{lat:.4f}/{lon:.4f}/{nm_radius}"
+        resp = requests.get(url, timeout=4)
+        if resp.status_code == 200:
+            data = resp.json()
+            ac_list = data.get("ac") or []
+            for a in ac_list:
+                callsign = (a.get("flight") or "").strip()
+                a_lat = a.get("lat")
+                a_lon = a.get("lon")
+                a_alt_ft = a.get("alt_baro") or a.get("alt_geom") or 0
+                if a_alt_ft == "ground":
+                    continue
+                a_alt_m = float(a_alt_ft) * 0.3048 if isinstance(a_alt_ft, (int, float)) else 0.0
+
+                if a_lat is not None and a_lon is not None and a_alt_m > 50:
+                    aircraft.append({
+                        "icao24": a.get("hex"),
+                        "callsign": callsign,
+                        "type_code": a.get("t"),
+                        "registration": a.get("r"),
+                        "origin_country": "Unknown",
+                        "latitude": float(a_lat),
+                        "longitude": float(a_lon),
+                        "altitude_m": a_alt_m,
+                        "altitude_ft": float(a_alt_ft) if isinstance(a_alt_ft, (int, float)) else 0.0,
+                        "speed_kmh": float(a.get("gs", 0)) * 1.852,
+                        "track": float(a.get("track", 0)),
+                        "source": "adsb_lol",
+                    })
+            if aircraft:
+                return aircraft
+    except Exception as err:
+        _LOGGER.debug("adsb.lol query error: %s", err)
+
+    # 2. Fallback to Airplanes.live
     try:
         nm_radius = max(5, int(radius_km * 0.539957))
         url = f"{AIRPLANES_LIVE_URL}/{lat:.4f}/{lon:.4f}/{nm_radius}"
-        resp = requests.get(url, timeout=4)
+        resp = requests.get(url, timeout=3)
         if resp.status_code == 200:
             data = resp.json()
             ac_list = data.get("ac") or []
@@ -404,7 +508,7 @@ def fetch_live_aircraft_sync(
     except Exception as err:
         _LOGGER.debug("Airplanes.live query error: %s", err)
 
-    # 2. Fallback to OpenSky Network
+    # 3. Fallback to OpenSky Network
     delta_lat = radius_km / 111.0
     delta_lon = radius_km / (111.0 * max(0.2, math.cos(math.radians(lat))))
     lamin = lat - delta_lat
@@ -509,18 +613,34 @@ def enrich_flight_details(aircraft: dict[str, Any], language: str = "fr") -> dic
         ac_details = fetch_aircraft_details(icao24)
         mfg = ac_details.get("manufacturer")
         m_type = ac_details.get("type")
-        if mfg and m_type:
+        t_from_hex = ac_details.get("icao_type")
+        if t_from_hex and t_from_hex.upper() in AIRCRAFT_TYPE_MAPPING:
+            model_name = AIRCRAFT_TYPE_MAPPING[t_from_hex.upper()]
+        elif mfg and m_type:
             model_name = f"{mfg} {m_type}".strip()
         elif m_type:
             model_name = m_type.strip()
 
+    if not model_name and type_code:
+        tc = type_code.upper()
+        if tc.startswith("A") and len(tc) == 4 and tc[1:].isdigit():
+            model_name = f"Airbus A{tc[1:]}"
+        elif tc.startswith("B") and len(tc) == 4 and tc[1:].isdigit():
+            model_name = f"Boeing {tc[1:]}"
+        elif tc.startswith("E") and len(tc) in (4, 5):
+            model_name = f"Embraer {tc}"
+        elif tc.startswith("CRJ"):
+            model_name = f"Bombardier {tc}"
+        else:
+            model_name = f"Modèle {tc}"
+
     if not model_name:
         if aircraft.get("altitude_ft", 0) > 25000:
-            model_name = "Avion de ligne (Gros porteur)" if language == "fr" else "Commercial Jetliner"
+            model_name = "Avion de ligne" if language == "fr" else "Commercial Jetliner"
         elif aircraft.get("altitude_ft", 0) > 10000:
-            model_name = "Avion régional / Jet" if language == "fr" else "Regional Jet"
+            model_name = "Avion régional" if language == "fr" else "Regional Aircraft"
         else:
-            model_name = "Avion léger / Hélice" if language == "fr" else "Light Aircraft"
+            model_name = "Avion léger" if language == "fr" else "Light Aircraft"
 
     # 4. Format Route
     route_str = None
