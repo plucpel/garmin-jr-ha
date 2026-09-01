@@ -441,6 +441,51 @@ class TestGarminJrClient(unittest.TestCase):
         self.assertLess(len(msg), 140)
         print("  [OK] Plane spotting filter, route enrichment, and Bounce watch formatting verified!")
 
+    def test_ai_bridge_pipeline(self):
+        """Test GarminBounceAiBridge session management, intent routing, and fallback."""
+        from custom_components.garmin_jr.ai_bridge import GarminBounceAiBridge, ChildSession
+
+        mock_hass = MagicMock()
+        mock_hass.states.is_state.return_value = True
+
+        bridge = GarminBounceAiBridge(mock_hass)
+        session = bridge.get_session("15839246")
+
+        # 1. Test flight context caching
+        session.set_spotted_flight({
+            "airline": "Air Transat",
+            "callsign_iata": "TSC385",
+            "model_name": "Airbus A321neo",
+            "route": "Paris (CDG) ➔ Montréal (YUL)",
+            "altitude_ft": 34000,
+            "speed_kmh": 870,
+        })
+        ctx = session.get_spotted_flight_context()
+        self.assertIsNotNone(ctx)
+        self.assertIn("Air Transat", ctx)
+        self.assertIn("A321neo", ctx)
+        self.assertIn("34 000 pi", ctx)
+
+        # 2. Test system prompt building
+        kid_data = {"active_geofence_name": "Papa (Maison)"}
+        prompt = bridge._build_system_prompt("Benjamin", kid_data, session)
+        self.assertIn("10 ans", prompt)
+        self.assertIn("chiffres réels", prompt)
+        self.assertIn("140 CARACTÈRES", prompt)
+        self.assertIn("Air Transat", prompt)
+
+        # 3. Test fallback handler
+        fallback_plane = bridge._fallback_handler("Quel est cet avion ?", "15839246", "Benjamin", kid_data, session)
+        self.assertIsInstance(fallback_plane, str)
+
+        fallback_garage = bridge._fallback_handler("Ouvre le garage stp", "15839246", "Benjamin", kid_data, session)
+        self.assertIn("garage", fallback_garage.lower())
+
+        fallback_chat = bridge._fallback_handler("Bonjour !", "15839246", "Benjamin", kid_data, session)
+        self.assertEqual(fallback_chat, "Message bien reçu! 👍")
+        print("  [OK] Strix Halo AI Bridge multi-turn context and action dispatching verified!")
+
+
 if __name__ == "__main__":
     unittest.main()
 

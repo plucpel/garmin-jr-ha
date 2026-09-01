@@ -7,6 +7,7 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceResponse, SupportsResponse
 
+from .ai_bridge import GarminBounceAiBridge
 from .const import (
     ATTR_CHILD_ID,
     ATTR_CHILD_NAME,
@@ -14,6 +15,7 @@ from .const import (
     ATTR_MESSAGE,
     ATTR_SEND_TO_WATCH,
     ATTR_TARGET,
+    ATTR_TEXT,
     CONF_DI_CLIENT_ID,
     CONF_DI_REFRESH_TOKEN,
     CONF_DI_TOKEN,
@@ -23,6 +25,7 @@ from .const import (
     DOMAIN,
     LOGGER,
     PLATFORMS,
+    SERVICE_PROCESS_BOUNCE_MESSAGE,
     SERVICE_REQUEST_LOCATION_UPDATE,
     SERVICE_SEND_MESSAGE,
     SERVICE_SPOT_PLANE,
@@ -43,6 +46,8 @@ _LOGGER = logging.getLogger(__name__)
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     """Set up the Garmin Jr component services."""
     hass.data.setdefault(DOMAIN, {})
+    ai_bridge = GarminBounceAiBridge(hass)
+    hass.data[DOMAIN]["ai_bridge"] = ai_bridge
 
     async def async_handle_send_message(call: Any) -> None:
         """Handle send_message service call."""
@@ -152,6 +157,8 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
                 top_plane = None
                 if ranked_planes:
                     top_plane = enrich_flight_details(ranked_planes[0], language=language)
+                    if ai_bridge:
+                        ai_bridge.get_session(target_kid_id).set_spotted_flight(top_plane)
 
                 # 4. Format kid-friendly watch message
                 formatted_msg = format_bounce_response(top_plane, loc_info, language=language)
@@ -179,6 +186,55 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
             "total_nearby_aircraft": 0,
         }
 
+    async def async_handle_process_bounce_message(call: Any) -> ServiceResponse:
+        """Handle incoming message from Bounce watch through Strix Halo NPU AI bridge."""
+        target = str(call.data.get(ATTR_TARGET, "")).strip()
+        incoming_text = str(call.data.get(ATTR_TEXT) or call.data.get(ATTR_MESSAGE) or "").strip()
+        send_to_watch = call.data.get(ATTR_SEND_TO_WATCH, True)
+
+        for entry_id, coordinator in hass.data.get(DOMAIN, {}).items():
+            if not isinstance(coordinator, GarminJrDataUpdateCoordinator) or not coordinator.data:
+                continue
+
+            target_kid_id = None
+            target_kid_data = None
+            target_pk = None
+
+            for kid_id, kid_data in coordinator.data.items():
+                if not target or target.lower() in (kid_id.lower(), kid_data.get(ATTR_CHILD_NAME, "").lower()):
+                    target_kid_id = kid_id
+                    target_kid_data = kid_data
+                    target_pk = kid_data.get("connectId") or kid_data.get("userProfilePk") or (137662175 if kid_id == "15839246" else kid_id)
+                    break
+
+            if target_kid_id and target_kid_data:
+                child_name = target_kid_data.get(ATTR_CHILD_NAME, "Benjamin")
+                reply = await hass.async_add_executor_job(
+                    ai_bridge.process_incoming_message,
+                    target_kid_id,
+                    child_name,
+                    incoming_text,
+                    target_kid_data,
+                )
+
+                if send_to_watch and target_pk and reply:
+                    await hass.async_add_executor_job(
+                        coordinator.client.send_text_message, target_pk, reply
+                    )
+
+                return {
+                    "reply": reply,
+                    "child_id": target_kid_id,
+                    "child_name": child_name,
+                }
+
+        _LOGGER.warning("Could not find Garmin Jr child profile matching target: %s", target)
+        return {
+            "reply": "Enfant non trouvé",
+            "child_id": None,
+            "child_name": None,
+        }
+
     hass.services.async_register(DOMAIN, SERVICE_SEND_MESSAGE, async_handle_send_message)
     hass.services.async_register(
         DOMAIN, SERVICE_REQUEST_LOCATION_UPDATE, async_handle_request_location_update
@@ -187,6 +243,12 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         DOMAIN,
         SERVICE_SPOT_PLANE,
         async_handle_spot_plane,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_PROCESS_BOUNCE_MESSAGE,
+        async_handle_process_bounce_message,
         supports_response=SupportsResponse.OPTIONAL,
     )
 
