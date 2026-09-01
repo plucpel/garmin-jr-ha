@@ -140,44 +140,9 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
             LOGGER.debug("Stopped Garmin Jr fast message polling timer")
 
     async def _async_poll_messages(self, _now: Any = None) -> None:
-        """Adaptive poll for messages: 0 polling in School Mode, 60s in Night Mode, 10s Active."""
+        """Poll for messages continuously every 10 seconds."""
         if not self.data or not self._initial_fetch_done:
             return
-
-        # Check operating mode across children
-        highest_mode = "active"
-        if self.data:
-            has_active = False
-            has_night = False
-            has_school = False
-            for child_id, child_data in self.data.items():
-                mode = get_child_operating_mode(child_data)
-                if mode == "active":
-                    has_active = True
-                    break
-                elif mode == "sleep_time":
-                    has_night = True
-                elif mode == "school_mode":
-                    has_school = True
-
-            if has_active:
-                highest_mode = "active"
-            elif has_night:
-                highest_mode = "sleep_time"
-            elif has_school:
-                highest_mode = "school_mode"
-
-        # 1. School Mode: Completely stop polling (0 API requests)
-        if highest_mode == "school_mode":
-            return
-
-        # 2. Night Mode: Relaxed 60-second polling
-        now_ts = time.time()
-        if highest_mode == "sleep_time":
-            if (now_ts - self._last_night_poll_ts) < 60:
-                return
-            self._last_night_poll_ts = now_ts
-            LOGGER.debug("Garmin Jr night mode active - polling at relaxed 60s interval")
 
         try:
             recent_messages = await self.hass.async_add_executor_job(
