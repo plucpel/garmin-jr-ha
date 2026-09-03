@@ -697,6 +697,8 @@ def format_bounce_response(
         lines = [f"✈️ {airline} ({callsign})"]
         if route:
             lines.append(f"🛫 {route}")
+        else:
+            lines.append("🛫 Vol privé / nolisé")
         if model:
             lines.append(f"🛩️ {model}")
         lines.append(f"🧭 {cardinal} ({elev_desc}, {elevation}°) • {alt_str}")
@@ -705,6 +707,8 @@ def format_bounce_response(
         lines = [f"✈️ {airline} ({callsign})"]
         if route:
             lines.append(f"🛫 {route}")
+        else:
+            lines.append("🛫 Private / Chartered flight")
         if model:
             lines.append(f"🛩️ {model}")
         lines.append(f"🧭 {cardinal} ({elev_desc}, {elevation}°) • {alt_ft:,} ft")

@@ -60,7 +60,7 @@ class ChildSession:
         airline = f.get("airline") or "Inconnu"
         callsign = f.get("callsign_iata") or f.get("callsign") or ""
         model = f.get("model_name") or "Avion de ligne"
-        route = f.get("route") or "En vol"
+        route = f.get("route") or "Vol privé / nolisé (sans horaire public)"
         alt_ft = int(round(f.get("altitude_ft", 0)))
         speed_kmh = int(round(f.get("speed_kmh", 0)))
 
