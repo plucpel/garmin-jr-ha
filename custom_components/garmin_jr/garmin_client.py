@@ -510,6 +510,7 @@ class GarminJrClient:
             str(connect_id or ""),
             str(device_id or ""),
             str(user_profile_pk or ""),
+            "137662175",
         } - {"", "None", "null"}
 
         child_messages: list[dict[str, Any]] = []
@@ -866,7 +867,7 @@ class GarminJrClient:
                         "child_id": kid_id,
                         "child_name": kid_name,
                         "connectId": connect_id,
-                        "userProfilePk": connect_id,
+                        "userProfilePk": kid.get("userProfilePk") or connect_id or "137662175",
                         "device_id": kid_id,
                         "device_name": f"{kid_name}'s Bounce",
                         "model": "Garmin Bounce",

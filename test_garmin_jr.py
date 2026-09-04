@@ -411,7 +411,21 @@ class TestGarminJrClient(unittest.TestCase):
         self.assertEqual(record["last_message_sender"], "Benjamin")
         self.assertEqual(record["last_message_media"], "Audio")
         self.assertEqual(len(record["new_messages"]), 1)
-        print("  [OK] Audio message transcription extraction and connectId resolution verified!")
+
+        # Verify fast message poll matching for Bounce profile PK 137662175
+        bounce_msg = [{
+            "messageId": "msg-bounce-1",
+            "toUserProfilePk": 150263349,
+            "fromUserProfilePk": 137662175,
+            "mediaType": "audio/amr",
+            "messageLength": 2316,
+            "transcription": None,
+            "createdTimestamp": "2026-09-04T19:19:51.921Z",
+        }]
+        parsed = client.parse_child_messages(bounce_msg, kid_id="15839246", device_id="15839246")
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["fromUserProfilePk"], 137662175)
+        print("  [OK] Audio message transcription extraction, Bounce profile 137662175, and connectId resolution verified!")
 
     def test_spot_plane_pipeline(self):
         """Test the plane spotting filter, ranking, and response formatting pipeline."""

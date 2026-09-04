@@ -33,7 +33,7 @@ from .const import (
 from .garmin_client import GarminJrAuthError, GarminJrClient, GarminJrConnectionError
 from .plane_spotter import prefetch_airspace_sync
 
-FAST_MESSAGE_POLL_INTERVAL_SECONDS = 10
+FAST_MESSAGE_POLL_INTERVAL_SECONDS = 5
 
 
 def format_time_str(time_val: Any) -> str:
@@ -304,11 +304,13 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
             has_pending_transcription = False
             for child_id, child_data in self.data.items():
                 connect_id = child_data.get("connectId") or child_data.get("account", {}).get("connectId")
+                user_profile_pk = child_data.get("userProfilePk") or child_data.get("user_profile_pk") or "137662175"
                 child_messages = self.client.parse_child_messages(
                     recent_messages,
                     kid_id=child_id,
                     connect_id=connect_id,
                     device_id=child_data.get("device_id"),
+                    user_profile_pk=user_profile_pk,
                 )
                 if not child_messages:
                     continue
