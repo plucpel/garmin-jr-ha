@@ -11,7 +11,7 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
@@ -182,6 +182,7 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
         self._last_night_poll_ts: float = 0.0
         self._school_mode_overrides: dict[str, bool] = {}
         self._was_in_school_mode: bool = False
+        self._rapid_retry_unsub: CALLBACK_TYPE | None = None
 
         scan_interval_seconds = entry.options.get(
             CONF_SCAN_INTERVAL,
@@ -227,11 +228,17 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
             self._unsub_msg_poll()
             self._unsub_msg_poll = None
             LOGGER.debug("Stopped Garmin Jr fast message polling timer")
+        if self._rapid_retry_unsub is not None:
+            self._rapid_retry_unsub()
+            self._rapid_retry_unsub = None
 
     async def _async_poll_messages(self, _now: Any = None) -> None:
         """Adaptive poll for messages: pause until school ends in School Mode, 60s in Night Mode, 10s Active."""
         if not self.data or not self._initial_fetch_done:
             return
+
+        if self._rapid_retry_unsub is not None:
+            self._rapid_retry_unsub = None
 
         now_ts = time.time()
 
@@ -285,6 +292,7 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
                 return
 
             has_updates = False
+            has_pending_transcription = False
             for child_id, child_data in self.data.items():
                 connect_id = child_data.get("connectId") or child_data.get("account", {}).get("connectId")
                 child_messages = self.client.parse_child_messages(
@@ -319,7 +327,8 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
                         try:
                             msg_dt = dt_util.parse_datetime(msg_time_str) if msg_time_str else None
                             if msg_dt and (dt_util.now() - msg_dt).total_seconds() < 90:
-                                LOGGER.debug("Audio message %s pending Garmin transcription, deferring...", msg_id)
+                                LOGGER.debug("Audio message %s pending Garmin transcription, scheduling rapid retry...", msg_id)
+                                has_pending_transcription = True
                                 continue
                         except Exception:
                             pass
@@ -384,6 +393,17 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
 
             if has_updates:
                 self.async_set_updated_data(dict(self.data))
+
+            # Rapid retry: if an untranscribed voice note is pending in Garmin cloud,
+            # retry in 2 seconds instead of waiting the full 10-second polling cycle
+            if has_pending_transcription:
+                if self._rapid_retry_unsub is not None:
+                    self._rapid_retry_unsub()
+                    self._rapid_retry_unsub = None
+                LOGGER.debug("Garmin Jr: Scheduling 2-second rapid retry for pending voice transcription")
+                self._rapid_retry_unsub = async_call_later(
+                    self.hass, 2.0, self._async_poll_messages
+                )
 
         except Exception as err:
             LOGGER.debug("Error during fast message poll: %s", err)

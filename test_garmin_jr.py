@@ -64,6 +64,7 @@ import datetime as _dt
 sys.modules["homeassistant.util.dt"].now = lambda *args, **kwargs: _dt.datetime.now()
 
 sys.modules["homeassistant.helpers.event"].async_track_time_interval = lambda *args, **kwargs: (lambda: None)
+sys.modules["homeassistant.helpers.event"].async_call_later = lambda *args, **kwargs: (lambda: None)
 sys.modules["homeassistant.core"].CALLBACK_TYPE = Any
 
 ha_flow = sys.modules["homeassistant.data_entry_flow"]
