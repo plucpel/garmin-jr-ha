@@ -22,7 +22,7 @@ from .plane_spotter import (
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_STRIX_HALO_URL = "http://192.168.50.6:13305"
-DEFAULT_MODEL = "gemma-4-E2B-QAT-MTP"
+DEFAULT_MODEL = "gemma4-it-e2b-FLM"
 MAX_HISTORY_TURNS = 6
 FLIGHT_CONTEXT_TTL_SECONDS = 1200  # 20 minutes
 
@@ -98,28 +98,18 @@ class GarminBounceAiBridge:
 
         prompt_lines = [
             f"Tu es l'assistant personnel de {child_name} (10 ans) sur sa montre Garmin Bounce.",
-            f"{child_name} est passionné et curieux : il aime les explications précises, les chiffres réels et les détails techniques (vitesse en km/h, capacité passagers, altitude, moteurs, principes physiques comme les traînées de condensation), tout en restant court et clair.",
+            f"{child_name} aime les explications précises, les chiffres réels et les détails techniques (vitesse en km/h, altitude, passagers), court et clair.",
             "",
-            "Contraintes strictes :",
-            "- Réponds TOUJOURS en français.",
-            "- Longueur maximale : MOINS DE 140 CARACTÈRES par message (écran de montre).",
-            "- Donne des chiffres et faits précis quand demandé (ex: ~220 passagers, ~870 km/h, 35 000 pi).",
-            "",
-            "Actions disponibles :",
-            "1. Si Benjamin demande quel avion passe ou veut repérer un avion dans le ciel :",
-            "ACTION: SPOT_PLANE",
-            "",
-            "2. Si Benjamin demande d'ouvrir la porte du garage :",
-            "ACTION: OPEN_GARAGE",
-            "",
-            "3. Pour toute question, discussion ou suivi technique :",
-            "ACTION: CHAT <ta réponse courte de moins de 140 caractères>",
+            "RÈGLES STRICTES :",
+            f"- 1. Si {child_name} demande de repérer ou identifier un nouvel avion dans le ciel (ex: \"Quel est cet avion ?\", \"Quel avion passe ?\") : Réponds UNIQUEMENT \"ACTION: SPOT_PLANE\"",
+            f"- 2. Si {child_name} demande d'ouvrir la porte du garage : Réponds UNIQUEMENT \"ACTION: OPEN_GARAGE\"",
+            f"- 3. Pour toute question sur l'avion déjà repéré (vitesse, destination, altitude, passagers) ou discussion générale : Réponds directement en français en MOINS DE 140 CARACTÈRES sans écrire le mot ACTION.",
             "",
             f"Lieu actuel de {child_name} : {safe_zone}.",
         ]
 
         if flight_ctx:
-            prompt_lines.append(f"Contexte de vol actuel : {flight_ctx}")
+            prompt_lines.append(f"Contexte du dernier avion repéré : {flight_ctx}")
 
         return "\n".join(prompt_lines)
 
