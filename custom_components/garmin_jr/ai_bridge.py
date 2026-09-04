@@ -9,6 +9,7 @@ import time
 from typing import Any
 
 import requests
+from requests.adapters import HTTPAdapter
 
 from .const import DOMAIN, LOGGER
 from .plane_spotter import (
@@ -82,6 +83,10 @@ class GarminBounceAiBridge:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.sessions: dict[str, ChildSession] = {}
+        self.http_session = requests.Session()
+        adapter = HTTPAdapter(pool_connections=5, pool_maxsize=10, max_retries=1)
+        self.http_session.mount("http://", adapter)
+        self.http_session.mount("https://", adapter)
 
     def get_session(self, child_id: str) -> ChildSession:
         """Retrieve or create child session."""
@@ -143,7 +148,7 @@ class GarminBounceAiBridge:
         raw_reply = None
         try:
             url = f"{self.base_url}/v1/chat/completions"
-            resp = requests.post(url, json=payload, timeout=6.0)
+            resp = self.http_session.post(url, json=payload, timeout=6.0)
             if resp.status_code == 200:
                 data = resp.json()
                 raw_reply = (

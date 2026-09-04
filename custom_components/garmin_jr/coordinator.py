@@ -31,6 +31,7 @@ from .const import (
     LOGGER,
 )
 from .garmin_client import GarminJrAuthError, GarminJrClient, GarminJrConnectionError
+from .plane_spotter import prefetch_airspace_sync
 
 FAST_MESSAGE_POLL_INTERVAL_SECONDS = 10
 
@@ -183,6 +184,8 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
         self._school_mode_overrides: dict[str, bool] = {}
         self._was_in_school_mode: bool = False
         self._rapid_retry_unsub: CALLBACK_TYPE | None = None
+        self._conversation_burst_until: float = 0.0
+        self._burst_poll_unsub: CALLBACK_TYPE | None = None
 
         scan_interval_seconds = entry.options.get(
             CONF_SCAN_INTERVAL,
@@ -231,6 +234,9 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
         if self._rapid_retry_unsub is not None:
             self._rapid_retry_unsub()
             self._rapid_retry_unsub = None
+        if self._burst_poll_unsub is not None:
+            self._burst_poll_unsub()
+            self._burst_poll_unsub = None
 
     async def _async_poll_messages(self, _now: Any = None) -> None:
         """Adaptive poll for messages: pause until school ends in School Mode, 60s in Night Mode, 10s Active."""
@@ -239,6 +245,8 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
 
         if self._rapid_retry_unsub is not None:
             self._rapid_retry_unsub = None
+        if self._burst_poll_unsub is not None:
+            self._burst_poll_unsub = None
 
         now_ts = time.time()
 
@@ -363,7 +371,8 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
                             "incoming": is_from_child,
                         }
                         self.hass.bus.async_fire(EVENT_MESSAGE_RECEIVED, event_data)
-                        LOGGER.info("Fast message poll: received incoming Garmin message from child '%s' (event %s fired)", text_content, EVENT_MESSAGE_RECEIVED)
+                        self._conversation_burst_until = now_ts + 90.0
+                        LOGGER.info("Fast message poll: received incoming Garmin message from child '%s' (event %s fired, 90s burst active)", text_content, EVENT_MESSAGE_RECEIVED)
 
                 # Update the latest message attributes on child_data
                 latest_msg = child_messages[0]
@@ -404,6 +413,30 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
                 LOGGER.debug("Garmin Jr: Scheduling 2-second rapid retry for pending voice transcription")
                 self._rapid_retry_unsub = async_call_later(
                     self.hass, 2.0, self._async_poll_messages
+                )
+
+                # Speculatively prefetch overhead airspace for child's location in background
+                for child_id, child_data in self.data.items():
+                    trackpoints = child_data.get("trackpoints") or []
+                    if trackpoints:
+                        latest_tp = trackpoints[-1]
+                        lat = latest_tp.get("latitude")
+                        lon = latest_tp.get("longitude")
+                        if lat and lon:
+                            LOGGER.debug("Garmin Jr: Speculatively prefetching airspace for (%.4f, %.4f)", lat, lon)
+                            self.hass.async_add_executor_job(prefetch_airspace_sync, lat, lon)
+            elif (
+                now_ts < self._conversation_burst_until
+                and not is_night_mode
+                and now_ts >= self._school_mode_pause_until
+            ):
+                # Active conversation burst: schedule next poll in 3.0 seconds
+                if self._burst_poll_unsub is not None:
+                    self._burst_poll_unsub()
+                    self._burst_poll_unsub = None
+                LOGGER.debug("Garmin Jr: Conversation burst active - scheduling next poll in 3.0s")
+                self._burst_poll_unsub = async_call_later(
+                    self.hass, 3.0, self._async_poll_messages
                 )
 
         except Exception as err:

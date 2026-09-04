@@ -1,14 +1,56 @@
 """Plane Spotter engine for Garmin Jr integration."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import math
 import time
 from typing import Any
 
 import requests
+from requests.adapters import HTTPAdapter
 
 _LOGGER = logging.getLogger(__name__)
+
+# Connection pooling & Keep-Alive session for fast flight lookups
+_SPOTTER_SESSION: requests.Session | None = None
+
+
+def get_spotter_session() -> requests.Session:
+    """Get or initialize thread-safe persistent requests session with connection pooling."""
+    global _SPOTTER_SESSION
+    if _SPOTTER_SESSION is None:
+        _SPOTTER_SESSION = requests.Session()
+        adapter = HTTPAdapter(pool_connections=10, pool_maxsize=20, max_retries=1)
+        _SPOTTER_SESSION.mount("https://", adapter)
+        _SPOTTER_SESSION.mount("http://", adapter)
+        _SPOTTER_SESSION.headers.update({"User-Agent": "GarminJr-Spotter/1.5.0"})
+    return _SPOTTER_SESSION
+
+
+# RAM cache for pre-fetched overhead airspace (20s TTL)
+AIRSPACE_CACHE_TTL = 20.0
+_AIRSPACE_CACHE: dict[str, Any] = {
+    "lat": 0.0,
+    "lon": 0.0,
+    "aircraft": [],
+    "timestamp": 0.0,
+}
+
+
+def prefetch_airspace_sync(lat: float, lon: float, radius_km: float = 45.0) -> list[dict[str, Any]]:
+    """Prefetch and cache overhead airspace in the background."""
+    global _AIRSPACE_CACHE
+    aircraft = fetch_live_aircraft_sync(lat, lon, radius_km, bypass_cache=True)
+    if aircraft:
+        _AIRSPACE_CACHE = {
+            "lat": lat,
+            "lon": lon,
+            "aircraft": aircraft,
+            "timestamp": time.time(),
+        }
+        _LOGGER.debug("Garmin Jr: Prefetched and cached %d aircraft for (%s, %s)", len(aircraft), lat, lon)
+    return aircraft
 
 # Primary ADS-B radar endpoints
 ADSB_LOL_API_URL = "https://api.adsb.lol/v2/point"
@@ -194,7 +236,7 @@ def fetch_flight_route(callsign: str, language: str = "fr") -> dict[str, Any]:
     clean_callsign = callsign.strip().upper()
     try:
         url = f"https://api.adsbdb.com/v0/callsign/{clean_callsign}"
-        resp = requests.get(url, timeout=2.5)
+        resp = get_spotter_session().get(url, timeout=2.5)
         if resp.status_code == 200:
             data = resp.json().get("response", {}).get("flightroute", {})
             orig = data.get("origin", {})
@@ -225,11 +267,12 @@ def fetch_aircraft_details(icao24: str) -> dict[str, Any]:
     if not icao24:
         return {}
     clean_hex = icao24.strip().lower()
+    session = get_spotter_session()
 
     # 1. Query adsb.lol hex endpoint
     try:
         url = f"https://api.adsb.lol/v2/hex/{clean_hex}"
-        resp = requests.get(url, timeout=2.0)
+        resp = session.get(url, timeout=2.0)
         if resp.status_code == 200:
             ac_list = resp.json().get("ac") or []
             if ac_list:
@@ -256,7 +299,7 @@ def fetch_aircraft_details(icao24: str) -> dict[str, Any]:
     # 2. Query opendata.adsb.fi hex endpoint
     try:
         url = f"https://opendata.adsb.fi/api/v2/hex/{clean_hex}"
-        resp = requests.get(url, timeout=2.0)
+        resp = session.get(url, timeout=2.0)
         if resp.status_code == 200:
             ac_list = resp.json().get("ac") or []
             if ac_list:
@@ -281,7 +324,7 @@ def fetch_aircraft_details(icao24: str) -> dict[str, Any]:
     # 3. Query adsbdb.com
     try:
         url = f"https://api.adsbdb.com/v0/aircraft/{clean_hex}"
-        resp = requests.get(url, timeout=2.0)
+        resp = session.get(url, timeout=2.0)
         if resp.status_code == 200:
             data = resp.json().get("response", {}).get("aircraft", {})
             mfg = data.get("manufacturer")
@@ -434,16 +477,30 @@ def resolve_kid_location(
 
 
 def fetch_live_aircraft_sync(
-    lat: float, lon: float, radius_km: float = 45.0
+    lat: float, lon: float, radius_km: float = 45.0, bypass_cache: bool = False
 ) -> list[dict[str, Any]]:
     """Fetch live aircraft states around coordinates prioritizing fast ADS-B feeds."""
+    global _AIRSPACE_CACHE
+    now = time.time()
+    if not bypass_cache and (now - _AIRSPACE_CACHE["timestamp"]) < AIRSPACE_CACHE_TTL:
+        d_lat = abs(lat - _AIRSPACE_CACHE["lat"])
+        d_lon = abs(lon - _AIRSPACE_CACHE["lon"])
+        if d_lat < 0.05 and d_lon < 0.05 and _AIRSPACE_CACHE["aircraft"]:
+            _LOGGER.debug(
+                "Garmin Jr: Serving airspace from fast RAM cache (%d aircraft, age %.1fs)",
+                len(_AIRSPACE_CACHE["aircraft"]),
+                now - _AIRSPACE_CACHE["timestamp"],
+            )
+            return list(_AIRSPACE_CACHE["aircraft"])
+
     aircraft: list[dict[str, Any]] = []
+    session = get_spotter_session()
 
     # 1. Try adsb.lol first (open, returns exact ICAO type codes, speeds, altitudes, registrations)
     try:
         nm_radius = max(5, int(radius_km * 0.539957))
         url = f"{ADSB_LOL_API_URL}/{lat:.4f}/{lon:.4f}/{nm_radius}"
-        resp = requests.get(url, timeout=4)
+        resp = session.get(url, timeout=4)
         if resp.status_code == 200:
             data = resp.json()
             ac_list = data.get("ac") or []
@@ -472,6 +529,12 @@ def fetch_live_aircraft_sync(
                         "source": "adsb_lol",
                     })
             if aircraft:
+                _AIRSPACE_CACHE = {
+                    "lat": lat,
+                    "lon": lon,
+                    "aircraft": aircraft,
+                    "timestamp": time.time(),
+                }
                 return aircraft
     except Exception as err:
         _LOGGER.debug("adsb.lol query error: %s", err)
@@ -480,7 +543,7 @@ def fetch_live_aircraft_sync(
     try:
         nm_radius = max(5, int(radius_km * 0.539957))
         url = f"{AIRPLANES_LIVE_URL}/{lat:.4f}/{lon:.4f}/{nm_radius}"
-        resp = requests.get(url, timeout=3)
+        resp = session.get(url, timeout=3)
         if resp.status_code == 200:
             data = resp.json()
             ac_list = data.get("ac") or []
@@ -588,13 +651,30 @@ def filter_and_rank_planes(
 
 
 def enrich_flight_details(aircraft: dict[str, Any], language: str = "fr") -> dict[str, Any]:
-    """Enrich flight with route (origin/destination), airline, make/model, and cardinal directions."""
+    """Enrich flight with route (origin/destination), airline, make/model, and cardinal directions concurrently."""
     callsign = aircraft.get("callsign", "")
     type_code = aircraft.get("type_code", "")
     icao24 = aircraft.get("icao24", "")
 
-    # 1. Fetch live route information (Origin ➔ Destination)
-    route_info = fetch_flight_route(callsign, language=language) if callsign else {}
+    # 1. Fetch live route information and aircraft details concurrently
+    route_info: dict[str, Any] = {}
+    ac_details: dict[str, Any] = {}
+    needs_hex = not (type_code and type_code.upper() in AIRCRAFT_TYPE_MAPPING) and bool(icao24)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        route_fut = executor.submit(fetch_flight_route, callsign, language) if callsign else None
+        details_fut = executor.submit(fetch_aircraft_details, icao24) if needs_hex else None
+
+        if route_fut:
+            try:
+                route_info = route_fut.result(timeout=3.5) or {}
+            except Exception as err:
+                _LOGGER.debug("Route lookup future error: %s", err)
+        if details_fut:
+            try:
+                ac_details = details_fut.result(timeout=3.0) or {}
+            except Exception as err:
+                _LOGGER.debug("Details lookup future error: %s", err)
 
     # 2. Resolve Airline
     airline = None
@@ -614,8 +694,7 @@ def enrich_flight_details(aircraft: dict[str, Any], language: str = "fr") -> dic
 
     # 3. Resolve Specific Make / Model
     model_name = AIRCRAFT_TYPE_MAPPING.get(type_code.upper(), "") if type_code else ""
-    if not model_name and icao24:
-        ac_details = fetch_aircraft_details(icao24)
+    if not model_name and ac_details:
         mfg = ac_details.get("manufacturer")
         m_type = ac_details.get("type")
         t_from_hex = ac_details.get("icao_type")
