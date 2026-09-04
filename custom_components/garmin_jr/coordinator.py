@@ -354,6 +354,7 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
                         str(child_id),
                         str(connect_id or ""),
                         str(child_data.get("device_id") or ""),
+                        str(user_profile_pk or ""),
                         "137662175",
                     } - {"", "None", "null"}
 
@@ -394,6 +395,7 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
                     str(child_id),
                     str(connect_id or ""),
                     str(child_data.get("device_id") or ""),
+                    str(user_profile_pk or ""),
                     "137662175",
                 } - {"", "None", "null"}
                 child_data["last_message_sender"] = (
@@ -511,6 +513,7 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
                                 str(child_id),
                                 str(child_data.get("connectId") or ""),
                                 str(child_data.get("device_id") or ""),
+                                str(child_data.get("userProfilePk") or ""),
                                 "137662175",
                             } - {"", "None", "null"}
                             is_from_child = from_pk in kid_identifiers

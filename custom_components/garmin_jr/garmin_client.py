@@ -855,6 +855,7 @@ class GarminJrClient:
                             str(kid_connect_id or ""),
                             str(kid.get("deviceId") or ""),
                             str(kid.get("userProfilePk") or ""),
+                            "137662175",
                         } - {"", "None", "null"}
                         last_msg_sender = (
                             latest_msg.get("senderDisplayName")
