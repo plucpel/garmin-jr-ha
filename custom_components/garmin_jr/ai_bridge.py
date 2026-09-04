@@ -22,7 +22,7 @@ from .plane_spotter import (
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_STRIX_HALO_URL = "http://192.168.50.6:13305"
-DEFAULT_MODEL = "gemma4-it-e4b-FLM"
+DEFAULT_MODEL = "gemma-4-E2B-QAT-MTP"
 MAX_HISTORY_TURNS = 6
 FLIGHT_CONTEXT_TTL_SECONDS = 1200  # 20 minutes
 
@@ -146,7 +146,7 @@ class GarminBounceAiBridge:
             "model": self.model,
             "messages": messages,
             "temperature": 0.1,
-            "max_tokens": 60,
+            "max_tokens": 400,
         }
 
         # 1. Query Strix Halo NPU with timeout
