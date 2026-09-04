@@ -276,12 +276,9 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
             LOGGER.info("Garmin Jr: School Mode ended for the day. Resuming active fast polling and requesting full refresh.")
             self.hass.async_create_task(self.async_request_refresh())
 
-        # 3. Night Mode (Sleep Time): Relax polling to 60s
+        # 3. Night Mode (Sleep Time): Completely pause polling at night
         if is_night_mode:
-            if (now_ts - self._last_night_poll_ts) < 60:
-                return
-            self._last_night_poll_ts = now_ts
-            LOGGER.debug("Garmin Jr: Night mode active - polling at relaxed 60s interval")
+            return
 
         # 4. Active: Poll messages
         try:
