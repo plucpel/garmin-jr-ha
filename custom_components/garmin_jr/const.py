@@ -32,11 +32,15 @@ CONF_SCHOOL_MODE_END_TIME = "school_mode_end_time"
 CONF_SCHOOL_MODE_DAYS = "school_mode_days"
 CONF_NIGHT_MODE_ENABLED = "night_mode_enabled"
 CONF_CHILD_PROFILE_PKS = "child_profile_pks"
+CONF_LLM_URL = "llm_url"
+CONF_LLM_MODEL = "llm_model"
 
 DEFAULT_SCAN_INTERVAL = 300  # 5 minutes
 MIN_SCAN_INTERVAL = 60  # 1 minute
 DEFAULT_SCHOOL_MODE_START_TIME = "08:00"
 DEFAULT_SCHOOL_MODE_END_TIME = "15:00"
+DEFAULT_LLM_URL = "http://127.0.0.1:13305"
+DEFAULT_LLM_MODEL = "gemma4-it-e2b-FLM"
 
 PLATFORMS = ["device_tracker", "sensor", "switch"]
 

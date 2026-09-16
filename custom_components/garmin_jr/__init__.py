@@ -22,8 +22,12 @@ from .const import (
     CONF_DI_REFRESH_TOKEN,
     CONF_DI_TOKEN,
     CONF_EMAIL,
+    CONF_LLM_MODEL,
+    CONF_LLM_URL,
     CONF_PASSWORD,
     CONF_TOKEN_DATA,
+    DEFAULT_LLM_MODEL,
+    DEFAULT_LLM_URL,
     DOMAIN,
     LOGGER,
     PLATFORMS,
@@ -201,12 +205,18 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         coordinator, target_kid_id, target_kid_data, target_pk, _ = find_child_target(hass, target)
         if coordinator and target_kid_id and target_kid_data:
             child_name = target_kid_data.get(ATTR_CHILD_NAME, "Child")
+            options = getattr(coordinator.entry, "options", {}) if hasattr(coordinator, "entry") else {}
+            llm_url = str(options.get(CONF_LLM_URL) or DEFAULT_LLM_URL)
+            llm_model = str(options.get(CONF_LLM_MODEL) or DEFAULT_LLM_MODEL)
+
             reply = await hass.async_add_executor_job(
                 ai_bridge.process_incoming_message,
                 target_kid_id,
                 child_name,
                 incoming_text,
                 target_kid_data,
+                llm_url,
+                llm_model,
             )
 
             if send_to_watch and target_pk and reply:

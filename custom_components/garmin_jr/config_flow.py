@@ -17,6 +17,8 @@ from .const import (
     CONF_DI_REFRESH_TOKEN,
     CONF_DI_TOKEN,
     CONF_EMAIL,
+    CONF_LLM_MODEL,
+    CONF_LLM_URL,
     CONF_MFA_CODE,
     CONF_NIGHT_MODE_ENABLED,
     CONF_PASSWORD,
@@ -26,6 +28,8 @@ from .const import (
     CONF_SCHOOL_MODE_START_TIME,
     CONF_TOKENS,
     CONF_ZONE_MAPPING,
+    DEFAULT_LLM_MODEL,
+    DEFAULT_LLM_URL,
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_SCHOOL_MODE_END_TIME,
     DEFAULT_SCHOOL_MODE_START_TIME,
@@ -256,6 +260,8 @@ class GarminJrOptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_SCHOOL_MODE_START_TIME: user_input.get(CONF_SCHOOL_MODE_START_TIME, DEFAULT_SCHOOL_MODE_START_TIME),
                 CONF_SCHOOL_MODE_END_TIME: user_input.get(CONF_SCHOOL_MODE_END_TIME, DEFAULT_SCHOOL_MODE_END_TIME),
                 CONF_NIGHT_MODE_ENABLED: user_input.get(CONF_NIGHT_MODE_ENABLED, False),
+                CONF_LLM_URL: str(user_input.get(CONF_LLM_URL, DEFAULT_LLM_URL)).strip(),
+                CONF_LLM_MODEL: str(user_input.get(CONF_LLM_MODEL, DEFAULT_LLM_MODEL)).strip(),
             })
 
             # Save or remove per-child profile PK overrides
@@ -293,6 +299,14 @@ class GarminJrOptionsFlowHandler(config_entries.OptionsFlow):
             CONF_NIGHT_MODE_ENABLED,
             self.config_entry.data.get(CONF_NIGHT_MODE_ENABLED, False),
         )
+        current_llm_url = str(self.config_entry.options.get(
+            CONF_LLM_URL,
+            self.config_entry.data.get(CONF_LLM_URL, DEFAULT_LLM_URL),
+        ))
+        current_llm_model = str(self.config_entry.options.get(
+            CONF_LLM_MODEL,
+            self.config_entry.data.get(CONF_LLM_MODEL, DEFAULT_LLM_MODEL),
+        ))
 
         # 2. Fetch available Home Assistant zones
         zone_options = [
@@ -340,6 +354,18 @@ class GarminJrOptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_NIGHT_MODE_ENABLED,
                 default=current_night_enabled,
             ): selector.BooleanSelector(),
+            vol.Optional(
+                CONF_LLM_URL,
+                default=current_llm_url,
+            ): selector.TextSelector(
+                selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
+            ),
+            vol.Optional(
+                CONF_LLM_MODEL,
+                default=current_llm_model,
+            ): selector.TextSelector(
+                selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
+            ),
         }
 
         # 3. Add per-child Profile PK override selectors (leave blank by default so auto-discovery remains active)
