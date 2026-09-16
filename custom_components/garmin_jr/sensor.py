@@ -277,7 +277,7 @@ class GarminJrSensorEntity(
             identifiers={(DOMAIN, self.child_id)},
             name=child_name,
             manufacturer="Garmin",
-            model=data.get(ATTR_MODEL, "Garmin Bounce 2"),
+            model=data.get(ATTR_MODEL, "Garmin Bounce"),
             serial_number=str(data.get(ATTR_DEVICE_ID, "")),
         )
 
