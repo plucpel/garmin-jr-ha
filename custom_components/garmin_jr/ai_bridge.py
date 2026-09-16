@@ -12,7 +12,13 @@ from typing import Any
 import requests
 from requests.adapters import HTTPAdapter
 
-from .const import ATTR_CHILD_NAME, DOMAIN, LOGGER
+from .const import (
+    ATTR_CHILD_NAME,
+    DEFAULT_LLM_MODEL,
+    DEFAULT_LLM_URL,
+    DOMAIN,
+    LOGGER,
+)
 from .plane_spotter import (
     enrich_flight_details,
     fetch_live_aircraft_sync,
@@ -23,8 +29,8 @@ from .plane_spotter import (
 
 _LOGGER = logging.getLogger(__name__)
 
-DEFAULT_STRIX_HALO_URL = "http://127.0.0.1:13305"
-DEFAULT_MODEL = "gemma4-it-e2b-FLM"
+DEFAULT_STRIX_HALO_URL = DEFAULT_LLM_URL
+DEFAULT_MODEL = DEFAULT_LLM_MODEL
 MAX_HISTORY_TURNS = 6
 FLIGHT_CONTEXT_TTL_SECONDS = 1200  # 20 minutes
 
@@ -125,6 +131,8 @@ class GarminBounceAiBridge:
         child_name: str,
         incoming_text: str,
         child_data: dict[str, Any],
+        base_url: str | None = None,
+        model: str | None = None,
     ) -> str:
         """Process incoming voice/text message through Strix Halo NPU and execute appropriate action."""
         session = self.get_session(child_id)
@@ -138,8 +146,11 @@ class GarminBounceAiBridge:
         messages.extend(session.history)
         messages.append({"role": "user", "content": clean_text})
 
+        target_url = (base_url or self.base_url).rstrip("/")
+        target_model = model or self.model
+
         payload = {
-            "model": self.model,
+            "model": target_model,
             "messages": messages,
             "temperature": 0.1,
             "max_tokens": 400,
@@ -148,7 +159,7 @@ class GarminBounceAiBridge:
         # 1. Query Strix Halo NPU with timeout
         raw_reply = None
         try:
-            url = f"{self.base_url}/v1/chat/completions"
+            url = f"{target_url}/v1/chat/completions"
             resp = self.http_session.post(url, json=payload, timeout=6.0)
             if resp.status_code == 200:
                 data = resp.json()
@@ -160,7 +171,7 @@ class GarminBounceAiBridge:
                     "Strix Halo API returned %s: %s", resp.status_code, resp.text
                 )
         except Exception as err:
-            _LOGGER.warning("Could not reach Strix Halo LLM endpoint: %s", err)
+            _LOGGER.warning("Could not reach Strix Halo LLM endpoint at %s: %s", target_url, err)
 
         # 2. Handle LLM output or Fallback
         if not raw_reply:

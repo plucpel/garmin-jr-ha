@@ -969,6 +969,8 @@ class TestGarminJrClient(unittest.TestCase):
         schema = handler.async_show_form.call_args[1]["data_schema"].schema
         schema_keys = [str(k.schema if hasattr(k, "schema") else k) for k in schema.keys()]
         self.assertIn("profile_pk_kid_1", schema_keys)
+        self.assertIn("llm_url", schema_keys)
+        self.assertIn("llm_model", schema_keys)
         # Check that default is empty string when no previous override exists for kid_2
         mock_coord.data["kid_2"] = {"child_id": "kid_2", "user_profile_pk": "333444", "geofences": []}
         handler.async_show_form.reset_mock()
@@ -983,6 +985,8 @@ class TestGarminJrClient(unittest.TestCase):
         handler.async_create_entry = MagicMock(return_value={"type": "create_entry"})
         user_input = {
             CONF_SCAN_INTERVAL: 120,
+            "llm_url": "http://192.168.1.100:13305",
+            "llm_model": "custom-model",
             "profile_pk_kid_1": "777888999",
             "profile_pk_kid_2": "",
         }
@@ -990,6 +994,8 @@ class TestGarminJrClient(unittest.TestCase):
         handler.async_create_entry.assert_called_once()
         saved_data = handler.async_create_entry.call_args[1]["data"]
         self.assertEqual(saved_data[CONF_SCAN_INTERVAL], 120)
+        self.assertEqual(saved_data["llm_url"], "http://192.168.1.100:13305")
+        self.assertEqual(saved_data["llm_model"], "custom-model")
         self.assertEqual(saved_data["profile_pk_kid_1"], "777888999")
         self.assertNotIn("profile_pk_kid_2", saved_data)
         self.assertEqual(saved_data[CONF_ZONE_MAPPING], {"123": "zone.home"})
