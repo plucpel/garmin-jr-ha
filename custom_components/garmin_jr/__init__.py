@@ -6,6 +6,7 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceResponse, SupportsResponse
+from homeassistant.helpers import device_registry as dr
 
 from .ai_bridge import GarminBounceAiBridge
 from .const import (
@@ -306,4 +307,20 @@ async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
             return
 
     await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant, config_entry: ConfigEntry, device_entry: dr.DeviceEntry
+) -> bool:
+    """Remove a config entry from a device if no longer in use."""
+    coordinator: GarminJrDataUpdateCoordinator | None = hass.data.get(DOMAIN, {}).get(config_entry.entry_id)
+    if not coordinator or not coordinator.data:
+        return True
+
+    active_child_ids = {str(cid) for cid in coordinator.data.keys()}
+    for domain, ident in device_entry.identifiers:
+        if domain == DOMAIN and str(ident) in active_child_ids:
+            return False
+    return True
+
 

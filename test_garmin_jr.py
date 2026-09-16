@@ -1187,6 +1187,33 @@ class TestGarminJrClient(unittest.TestCase):
         self.assertEqual(sw_info.serial_number, "9876543210")
         print("  [OK] DeviceInfo consistency across sensor, tracker, and switch verified!")
 
+    def test_async_remove_config_entry_device(self):
+        """Test async_remove_config_entry_device properly distinguishes active vs orphaned devices."""
+        import asyncio
+        from custom_components.garmin_jr import async_remove_config_entry_device
+        from custom_components.garmin_jr.const import DOMAIN
+
+        mock_hass = MagicMock()
+        mock_entry = MagicMock()
+        mock_entry.entry_id = "test_entry"
+
+        mock_coord = MagicMock()
+        mock_coord.data = {"child_1": {"name": "Child One"}}
+        mock_hass.data = {DOMAIN: {"test_entry": mock_coord}}
+
+        # Active device (matches active child_1) -> should NOT allow removal (returns False)
+        active_device = MagicMock()
+        active_device.identifiers = {(DOMAIN, "child_1")}
+        res_active = asyncio.run(async_remove_config_entry_device(mock_hass, mock_entry, active_device))
+        self.assertFalse(res_active)
+
+        # Orphaned / old serial device (does NOT match any active child) -> SHOULD allow removal (returns True)
+        orphaned_device = MagicMock()
+        orphaned_device.identifiers = {(DOMAIN, "old_serial_99999")}
+        res_orphaned = asyncio.run(async_remove_config_entry_device(mock_hass, mock_entry, orphaned_device))
+        self.assertTrue(res_orphaned)
+        print("  [OK] async_remove_config_entry_device active vs orphaned device removal verified!")
+
 
 if __name__ == "__main__":
     unittest.main()
