@@ -118,7 +118,7 @@ ha_entries.ConfigFlow = type("ConfigFlow", (object,), {"__class_getitem__": lamb
 ha_entries.OptionsFlow = type("OptionsFlow", (), {})
 
 ha_dev_reg = sys.modules["homeassistant.helpers.device_registry"]
-ha_dev_reg.DeviceInfo = type("DeviceInfo", (), {"__init__": lambda *args, **kwargs: None})
+ha_dev_reg.DeviceInfo = type("DeviceInfo", (), {"__init__": lambda self, **kwargs: vars(self).update(kwargs)})
 
 ha_sel = sys.modules["homeassistant.helpers.selector"]
 ha_sel.SelectOptionDict = lambda **kwargs: kwargs
@@ -1147,6 +1147,45 @@ class TestGarminJrClient(unittest.TestCase):
         self.assertEqual(client._learned_child_pks.get("kid_1"), "55512345")
         self.assertNotIn("kid_2", client._learned_child_pks)
         print("  [OK] Cross-child PK collision prevention verified!")
+
+    def test_device_info_consistency(self):
+        """Test that sensor, device_tracker, and switch share consistent DeviceInfo identifiers."""
+        from custom_components.garmin_jr.sensor import GarminJrSensorEntity
+        from custom_components.garmin_jr.device_tracker import GarminJrTrackerEntity
+        from custom_components.garmin_jr.switch import GarminJrSchoolModeSwitch
+        from custom_components.garmin_jr.const import DOMAIN
+
+        mock_coord = MagicMock()
+        mock_coord.data = {
+            "child_123": {
+                "child_id": "child_123",
+                "child_name": "Test Child",
+                "device_id": "9876543210",
+                "model": "Garmin Bounce",
+            }
+        }
+        mock_coord.config_entry.entry_id = "test_entry"
+
+        sensor = GarminJrSensorEntity(mock_coord, "child_123", "battery")
+        tracker = GarminJrTrackerEntity(mock_coord, mock_coord.config_entry, "child_123")
+        switch = GarminJrSchoolModeSwitch(mock_coord, "child_123")
+
+        s_info = sensor.device_info
+        t_info = tracker.device_info
+        sw_info = switch.device_info
+
+        self.assertEqual(s_info.identifiers, {(DOMAIN, "child_123")})
+        self.assertEqual(t_info.identifiers, {(DOMAIN, "child_123")})
+        self.assertEqual(sw_info.identifiers, {(DOMAIN, "child_123")})
+
+        self.assertEqual(s_info.name, "Test Child")
+        self.assertEqual(t_info.name, "Test Child")
+        self.assertEqual(sw_info.name, "Test Child")
+
+        self.assertEqual(s_info.serial_number, "9876543210")
+        self.assertEqual(t_info.serial_number, "9876543210")
+        self.assertEqual(sw_info.serial_number, "9876543210")
+        print("  [OK] DeviceInfo consistency across sensor, tracker, and switch verified!")
 
 
 if __name__ == "__main__":

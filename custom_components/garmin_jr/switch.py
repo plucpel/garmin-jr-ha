@@ -162,13 +162,12 @@ class GarminJrSchoolModeSwitch(
         """Return device info for this child's watch."""
         child_data = self._child_data
         child_name = child_data.get(ATTR_CHILD_NAME) or f"Child {self.child_id}"
-        device_id = child_data.get(ATTR_DEVICE_ID) or self.child_id
         model = child_data.get(ATTR_MODEL) or "Garmin Bounce"
 
         return DeviceInfo(
-            identifiers={(DOMAIN, str(device_id))},
-            name=f"{child_name}'s {model}",
+            identifiers={(DOMAIN, self.child_id)},
+            name=child_name,
             manufacturer="Garmin",
             model=model,
-            via_device=(DOMAIN, str(self.coordinator.config_entry.entry_id)),
+            serial_number=str(child_data.get(ATTR_DEVICE_ID, "")),
         )
