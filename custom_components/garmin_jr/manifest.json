@@ -1,0 +1,11 @@
+{
+  "domain": "garmin_jr",
+  "name": "Garmin Jr",
+  "codeowners": ["@plucpel"],
+  "config_flow": true,
+  "documentation": "https://github.com/plucpel/garmin-jr-ha",
+  "integration_type": "hub",
+  "iot_class": "cloud_polling",
+  "requirements": ["garminconnect>=0.3.6", "curl_cffi>=0.7.0"],
+  "version": "1.5.9"
+}

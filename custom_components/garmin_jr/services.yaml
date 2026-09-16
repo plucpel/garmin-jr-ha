@@ -1,0 +1,62 @@
+send_message:
+  name: Send Message
+  description: Send a text message to a child's Garmin Bounce watch.
+  fields:
+    target:
+      name: Target Child
+      description: The name or child profile ID of the recipient. If omitted, sends to the first available child.
+      required: false
+      example: 'Alex'
+      selector:
+        text:
+    message:
+      name: Message
+      description: The text message content to display on the watch.
+      required: true
+      example: 'Time to come home!'
+      selector:
+        text:
+
+request_location_update:
+  name: Request Location Update
+  description: Request an immediate live GPS location ping to the child's watch over LTE.
+  fields:
+    target:
+      name: Target Child
+      description: The name or child profile ID of the watch to ping.
+      required: false
+      example: 'Alex'
+      selector:
+        text:
+
+spot_plane:
+  name: Spot Plane Overhead
+  description: Look up planes flying overhead based on child's location and sightline geometry.
+  fields:
+    target:
+      name: Target Child
+      description: The name or child profile ID of the child.
+      required: false
+      example: 'Alex'
+      selector:
+        text:
+    send_to_watch:
+      name: Send To Watch
+      description: Whether to automatically send the result message to the child's watch.
+      required: false
+      default: true
+      selector:
+        boolean:
+    language:
+      name: Language
+      description: Language for the generated message (fr or en).
+      required: false
+      default: 'fr'
+      selector:
+        select:
+          options:
+            - label: French
+              value: 'fr'
+            - label: English
+              value: 'en'
+
