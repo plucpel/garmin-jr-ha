@@ -289,9 +289,11 @@ class GarminBounceAiBridge:
             return "Tu n'es pas à la maison pour ouvrir le garage! 🏠"
 
         try:
-            # Schedule the blocking service call on the HA main event loop and await
-            # it from this worker thread with a bounded timeout, so a hung cover
-            # integration cannot block the executor thread indefinitely.
+            # Fire-and-forget on the HA main event loop. blocking=True would wait
+            # for the physical door to finish opening (10-30s on most cover
+            # integrations), delaying the watch reply until the kid is already
+            # through the door. Safety checks are done above, so dispatch the
+            # command and reply immediately; log failures via the done callback.
             if not (hasattr(self.hass, "services") and hasattr(self.hass.services, "async_call")):
                 raise RuntimeError("Home Assistant service registry unavailable")
             if not (hasattr(self.hass, "loop") and self.hass.loop.is_running()):
@@ -301,17 +303,19 @@ class GarminBounceAiBridge:
                     "cover",
                     "open_cover",
                     target={"entity_id": "cover.garage_door"},
-                    blocking=True,
+                    blocking=False,
                 ),
                 self.hass.loop,
             )
-            try:
-                future.result(timeout=10)
-            except concurrent.futures.TimeoutError:
-                future.cancel()
-                _LOGGER.error("Timed out waiting for cover.open_cover on the Home Assistant event loop")
-                return "Le garage met trop de temps à répondre! ⏳"
-            _LOGGER.info("Garmin Jr: Successfully triggered cover.open_cover for cover.garage_door")
+
+            def _log_dispatch_result(fut: "concurrent.futures.Future") -> None:
+                err = fut.exception()
+                if err:
+                    _LOGGER.error("cover.open_cover dispatch failed: %s", err)
+                else:
+                    _LOGGER.info("Garmin Jr: Dispatched cover.open_cover for cover.garage_door")
+
+            future.add_done_callback(_log_dispatch_result)
             return "J'ouvre la porte du garage! 🚪 Sois prudent!"
         except Exception as err:
             _LOGGER.error("Failed to open garage door via service call: %s", err)

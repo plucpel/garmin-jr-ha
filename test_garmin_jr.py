@@ -1222,7 +1222,6 @@ class TestGarminJrClient(unittest.TestCase):
 
     def test_ai_bridge_open_garage_near_and_away(self):
         """Test that AI bridge open garage securely validates safe zone and dispatches cover service call."""
-        import concurrent.futures
         from unittest.mock import patch
 
         from custom_components.garmin_jr.ai_bridge import GarminBounceAiBridge
@@ -1241,14 +1240,15 @@ class TestGarminJrClient(unittest.TestCase):
         self.assertIn("Tu n'es pas à la maison", res_away)
         mock_hass.services.async_call.assert_not_called()
 
-        # 2. Kid is Near Home (Papa) -> schedules blocking async_call on HA loop
+        # 2. Kid is Near Home (Papa) -> schedules non-blocking async_call on HA loop
+        #    (reply must not wait for the physical door to finish opening)
         child_home = {
             "child_id": "15839246",
             "child_name": "Benjamin",
             "garmin_safe_zone": "Papa",
         }
         ok_future = MagicMock()
-        ok_future.result.return_value = None
+        ok_future.exception.return_value = None
         with patch(
             "custom_components.garmin_jr.ai_bridge.asyncio.run_coroutine_threadsafe",
             return_value=ok_future,
@@ -1260,18 +1260,9 @@ class TestGarminJrClient(unittest.TestCase):
             "cover",
             "open_cover",
             target={"entity_id": "cover.garage_door"},
-            blocking=True,
+            blocking=False,
         )
-        # 3. Hung cover integration -> bounded timeout, future cancelled, error reply
-        timeout_future = MagicMock()
-        timeout_future.result.side_effect = concurrent.futures.TimeoutError()
-        with patch(
-            "custom_components.garmin_jr.ai_bridge.asyncio.run_coroutine_threadsafe",
-            return_value=timeout_future,
-        ):
-            res_timeout = bridge._execute_open_garage(child_home)
-        self.assertIn("trop de temps", res_timeout)
-        timeout_future.cancel.assert_called_once()
+        ok_future.add_done_callback.assert_called_once()
 
         mock_hass.services.async_call.reset_mock()
 
@@ -1295,7 +1286,7 @@ class TestGarminJrClient(unittest.TestCase):
             "cover",
             "open_cover",
             target={"entity_id": "cover.garage_door"},
-            blocking=True,
+            blocking=False,
         )
         mock_hass.services.async_call.reset_mock()
 
@@ -1315,7 +1306,7 @@ class TestGarminJrClient(unittest.TestCase):
             self.assertIn("J'ouvre la porte du garage", res_phrase)
             mock_hass.services.async_call.assert_called_once()
 
-        print("  [OK] AI Bridge open garage safe zone verification, timeout, GPS proximity, and natural phrasing intent verified!")
+        print("  [OK] AI Bridge open garage safe zone verification, non-blocking dispatch, GPS proximity, and natural phrasing intent verified!")
 
 
 if __name__ == "__main__":
