@@ -187,7 +187,7 @@ class GarminBounceAiBridge:
         is_open_garage = (
             "OPEN_GARAGE" in upper_reply
             or (
-                bool(re.search(r"\b(ouvr[e|ir|ez]|open)\b", clean_text, re.IGNORECASE))
+                bool(re.search(r"\b(ouvre|ouvrir|ouvrez|open)\b", clean_text, re.IGNORECASE))
                 and not bool(re.search(r"\b(avion|plane|fen[eê]tre|app|application)\b", clean_text, re.IGNORECASE))
             )
         )
@@ -329,6 +329,6 @@ class GarminBounceAiBridge:
         lower = text.lower()
         if any(w in lower for w in ("avion", "plane", "vole", "ciel", "vol")):
             return self._execute_spot_plane(child_id, child_data, session)
-        if any(w in lower for w in ("garage", "porte")) or re.search(r"\b(ouvr[e|ir|ez]|open)\b", lower):
+        if any(w in lower for w in ("garage", "porte")) or re.search(r"\b(ouvre|ouvrir|ouvrez|open)\b", lower):
             return self._execute_open_garage(child_data)
         return "Message bien reçu! 👍"
