@@ -384,9 +384,9 @@ class GarminJrClient:
             headers = self._get_it_headers()
             url = f"{GCS_API_BASE_URL}/tracker/family/api/v1/trackpoints"
             begin = (
-                datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2)
+                datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=12)
             ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-            params: dict[str, Any] = {"kidProfileId": tracker_id, "begin": begin, "limit": limit}
+            params: dict[str, Any] = {"kidProfileId": tracker_id, "begin": begin, "limit": max(limit, 200)}
             resp = requests.get(url, headers=headers, params=params, timeout=15)
             if resp.status_code == 200:
                 data = resp.json()
@@ -854,7 +854,7 @@ class GarminJrClient:
 
                     # Use connectId for the GCS tracker API (not the Garmin Jr kid id)
                     kid_connect_id = kid.get("connectId")
-                    trackpoints = self.fetch_trackpoints(kid_id, limit=50, connect_id=kid_connect_id)
+                    trackpoints = self.fetch_trackpoints(kid_id, limit=200, connect_id=kid_connect_id)
                     if trackpoints:
                         # Sort trackpoints ascending by timestamp to guarantee latest_pt is newest
                         trackpoints.sort(

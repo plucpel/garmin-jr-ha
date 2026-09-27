@@ -1262,7 +1262,6 @@ class TestGarminJrClient(unittest.TestCase):
             target={"entity_id": "cover.garage_door"},
             blocking=True,
         )
-
         # 3. Hung cover integration -> bounded timeout, future cancelled, error reply
         timeout_future = MagicMock()
         timeout_future.result.side_effect = concurrent.futures.TimeoutError()
@@ -1273,7 +1272,50 @@ class TestGarminJrClient(unittest.TestCase):
             res_timeout = bridge._execute_open_garage(child_home)
         self.assertIn("trop de temps", res_timeout)
         timeout_future.cancel.assert_called_once()
-        print("  [OK] AI Bridge open garage safe zone verification, thread-safe dispatch, and timeout handling verified!")
+
+        mock_hass.services.async_call.reset_mock()
+
+        # 4. Kid is Outside geofence but physically 80m from Home coordinates -> GPS proximity triggers open
+        mock_hass.config.latitude = 46.7863
+        mock_hass.config.longitude = -71.2540
+        child_driveway = {
+            "child_id": "15839246",
+            "child_name": "Benjamin",
+            "garmin_safe_zone": "Outside",
+            "latitude": 46.7857,
+            "longitude": -71.2534,
+        }
+        with patch(
+            "custom_components.garmin_jr.ai_bridge.asyncio.run_coroutine_threadsafe",
+            return_value=ok_future,
+        ):
+            res_driveway = bridge._execute_open_garage(child_driveway)
+        self.assertIn("J'ouvre la porte du garage", res_driveway)
+        mock_hass.services.async_call.assert_called_once_with(
+            "cover",
+            "open_cover",
+            target={"entity_id": "cover.garage_door"},
+            blocking=True,
+        )
+        mock_hass.services.async_call.reset_mock()
+
+        # 5. Test intent regex matching on natural phrasing: "Ouvre la pour de vrai parce que là tu l'ouvres pas."
+        with patch.object(bridge.http_session, "post") as mock_post:
+            mock_post.return_value.status_code = 200
+            mock_post.return_value.json.return_value = {
+                "choices": [{"message": {"content": "Je suis un assistant virtuel. Je ne peux pas interagir physiquement avec le monde réel."}}]
+            }
+            with patch(
+                "custom_components.garmin_jr.ai_bridge.asyncio.run_coroutine_threadsafe",
+                return_value=ok_future,
+            ):
+                res_phrase = bridge.process_incoming_message(
+                    "15839246", "Benjamin", "Ouvre la pour de vrai parce que là tu l'ouvres pas.", child_home
+                )
+            self.assertIn("J'ouvre la porte du garage", res_phrase)
+            mock_hass.services.async_call.assert_called_once()
+
+        print("  [OK] AI Bridge open garage safe zone verification, timeout, GPS proximity, and natural phrasing intent verified!")
 
 
 if __name__ == "__main__":

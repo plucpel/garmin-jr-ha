@@ -25,6 +25,7 @@ from .plane_spotter import (
     fetch_live_aircraft_sync,
     filter_and_rank_planes,
     format_bounce_response,
+    haversine_bearing_elevation,
     resolve_kid_location,
 )
 
@@ -111,11 +112,12 @@ class GarminBounceAiBridge:
 
         prompt_lines = [
             f"Tu es l'assistant personnel de {child_name} (10 ans) sur sa montre Garmin Bounce.",
+            "Tu ES directement connecté à la domotique Home Assistant de sa maison et aux radars aériens.",
             f"{child_name} aime les explications précises, les chiffres réels et les détails techniques (vitesse en km/h, altitude, passagers), court et clair.",
             "",
-            "RÈGLES STRICTES :",
-            f"- 1. Si {child_name} demande de repérer ou identifier un nouvel avion dans le ciel (ex: \"Quel est cet avion ?\", \"Quel avion passe ?\") : Réponds UNIQUEMENT \"ACTION: SPOT_PLANE\"",
-            f"- 2. Si {child_name} demande d'ouvrir la porte du garage : Réponds UNIQUEMENT \"ACTION: OPEN_GARAGE\"",
+            "RÈGLES D'ACTION STRICTES :",
+            f"- 1. Si {child_name} demande de repérer, identifier ou voir un avion dans le ciel (ex: \"Quel est cet avion ?\", \"Quel avion passe ?\") : Réponds UNIQUEMENT \"ACTION: SPOT_PLANE\"",
+            f"- 2. Si {child_name} demande d'ouvrir la porte du garage ou d'ouvrir (ex: \"Ouvre le garage\", \"Ouvre la porte\", \"Ouvre la\", \"Ouvre pour de vrai\", \"Ouvre-la\", \"Peux-tu ouvrir ?\") : Réponds UNIQUEMENT \"ACTION: OPEN_GARAGE\"",
             f"- 3. Pour toute question sur l'avion déjà repéré (vitesse, destination, altitude, passagers) ou discussion générale : Réponds directement en français en MOINS DE 140 CARACTÈRES sans écrire le mot ACTION.",
             "",
             f"Lieu actuel de {child_name} : {safe_zone}.",
@@ -180,13 +182,23 @@ class GarminBounceAiBridge:
 
         # 3. Action Dispatching
         upper_reply = raw_reply.upper()
-        if "SPOT_PLANE" in upper_reply:
+
+        # Check intent for open garage (either from LLM ACTION: OPEN_GARAGE or explicit open intent in message)
+        is_open_garage = (
+            "OPEN_GARAGE" in upper_reply
+            or (
+                bool(re.search(r"\b(ouvr[e|ir|ez]|open)\b", clean_text, re.IGNORECASE))
+                and not bool(re.search(r"\b(avion|plane|fen[eê]tre|app|application)\b", clean_text, re.IGNORECASE))
+            )
+        )
+
+        if "SPOT_PLANE" in upper_reply or (not is_open_garage and any(w in clean_text.lower() for w in ("quel est cet avion", "avion passe", "spot plane"))):
             result = self._execute_spot_plane(child_id, child_data, session)
             session.add_turn("user", clean_text)
             session.add_turn("assistant", result)
             return result
 
-        if "OPEN_GARAGE" in upper_reply:
+        if is_open_garage:
             result = self._execute_open_garage(child_data)
             session.add_turn("user", clean_text)
             session.add_turn("assistant", result)
@@ -238,12 +250,14 @@ class GarminBounceAiBridge:
             f"device_tracker.garmin_jr_{child_id}_tracker",
             f"device_tracker.garmin_jr_{child_id}_location",
             f"device_tracker.{child_name}_location",
+            f"device_tracker.{child_name}_{child_name}_location",
         ]
 
         is_near_home = (
             "papa" in safe_zone
             or "home" in safe_zone
             or "maison" in safe_zone
+            or "1162" in safe_zone
             or (
                 hasattr(self.hass, "states")
                 and any(
@@ -253,6 +267,23 @@ class GarminBounceAiBridge:
                 )
             )
         )
+
+        # Proximity fallback: check GPS distance to Home Assistant home zone (< 500 meters)
+        if not is_near_home and hasattr(self.hass, "config") and self.hass.config:
+            kid_lat = child_data.get("latitude")
+            kid_lon = child_data.get("longitude")
+            home_lat = getattr(self.hass.config, "latitude", None)
+            home_lon = getattr(self.hass.config, "longitude", None)
+            if kid_lat is not None and kid_lon is not None and home_lat is not None and home_lon is not None:
+                try:
+                    dist_m, _, _ = haversine_bearing_elevation(
+                        float(home_lat), float(home_lon), float(kid_lat), float(kid_lon), 0.0
+                    )
+                    if dist_m <= 500.0:
+                        is_near_home = True
+                        _LOGGER.debug("Garmin Jr: Child GPS is within %.1fm of home (near home)", dist_m)
+                except Exception as dist_err:
+                    _LOGGER.debug("Error computing distance to home: %s", dist_err)
 
         if not is_near_home:
             return "Tu n'es pas à la maison pour ouvrir le garage! 🏠"
@@ -296,8 +327,8 @@ class GarminBounceAiBridge:
     ) -> str:
         """Rule-based fallback when Strix Halo inference server is offline."""
         lower = text.lower()
-        if "avion" in lower or "plane" in lower or "vole" in lower:
+        if any(w in lower for w in ("avion", "plane", "vole", "ciel", "vol")):
             return self._execute_spot_plane(child_id, child_data, session)
-        if "garage" in lower or "porte" in lower:
+        if any(w in lower for w in ("garage", "porte")) or re.search(r"\b(ouvr[e|ir|ez]|open)\b", lower):
             return self._execute_open_garage(child_data)
         return "Message bien reçu! 👍"
