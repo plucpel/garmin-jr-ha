@@ -223,7 +223,7 @@ class GarminBounceAiBridge:
 
     def _execute_open_garage(self, child_data: dict[str, Any]) -> str:
         """Check safe zone presence and trigger garage door opening."""
-        # Safe zone check: Papa / Home / zone.home (case-insensitive)
+        # Safe zone check: Papa / Home / Maison / zone.home (case-insensitive)
         safe_zone = str(
             child_data.get("active_geofence_name")
             or child_data.get("garmin_safe_zone")
@@ -232,8 +232,12 @@ class GarminBounceAiBridge:
         ).lower()
 
         child_id = str(child_data.get("child_id") or child_data.get("id") or "")
+        child_name = str(child_data.get("child_name") or child_data.get("displayName") or "").lower().replace(" ", "_")
         tracker_entities = [
             f"device_tracker.garmin_jr_{child_id}_tracker",
+            f"device_tracker.garmin_jr_{child_id}_location",
+            f"device_tracker.{child_name}_{child_name}_location",
+            f"device_tracker.{child_name}_location",
         ]
 
         is_near_home = (
@@ -244,7 +248,7 @@ class GarminBounceAiBridge:
                 hasattr(self.hass, "states")
                 and any(
                     (state := self.hass.states.get(entity_id)) is not None
-                    and str(state.state).lower() in ("home", "papa", "maison")
+                    and str(state.state).lower() in ("home", "papa", "maison", "zone.home")
                     for entity_id in tracker_entities
                 )
             )
@@ -254,9 +258,37 @@ class GarminBounceAiBridge:
             return "Tu n'es pas à la maison pour ouvrir le garage! 🏠"
 
         try:
-            coro = self.hass.services.async_call("cover", "open_cover", {"entity_id": "cover.garage_door"}, blocking=False)
-            if asyncio.iscoroutine(coro) and hasattr(self.hass, "loop") and self.hass.loop.is_running():
-                asyncio.run_coroutine_threadsafe(coro, self.hass.loop)
+            # 1. Prefer synchronous thread-safe service call (standard for worker threads in HA)
+            if hasattr(self.hass, "services") and hasattr(self.hass.services, "call"):
+                try:
+                    self.hass.services.call(
+                        "cover",
+                        "open_cover",
+                        service_data={"entity_id": "cover.garage_door"},
+                        target={"entity_id": "cover.garage_door"},
+                        blocking=True,
+                    )
+                    _LOGGER.info("Garmin Jr: Successfully triggered cover.open_cover for cover.garage_door via services.call")
+                    return "J'ouvre la porte du garage! 🚪 Sois prudent!"
+                except Exception as sync_err:
+                    _LOGGER.debug("Direct services.call failed, attempting async_call via run_coroutine_threadsafe: %s", sync_err)
+
+            # 2. Fallback to async_call scheduled and awaited on the HA main event loop
+            if hasattr(self.hass, "services") and hasattr(self.hass.services, "async_call"):
+                coro = self.hass.services.async_call(
+                    "cover",
+                    "open_cover",
+                    service_data={"entity_id": "cover.garage_door"},
+                    target={"entity_id": "cover.garage_door"},
+                    blocking=True,
+                )
+                if asyncio.iscoroutine(coro) and hasattr(self.hass, "loop") and self.hass.loop.is_running():
+                    future = asyncio.run_coroutine_threadsafe(coro, self.hass.loop)
+                    future.result(timeout=10)
+                elif asyncio.iscoroutine(coro):
+                    asyncio.run(coro)
+
+            _LOGGER.info("Garmin Jr: Successfully triggered cover.open_cover for cover.garage_door via async_call")
             return "J'ouvre la porte du garage! 🚪 Sois prudent!"
         except Exception as err:
             _LOGGER.error("Failed to open garage door via service call: %s", err)
