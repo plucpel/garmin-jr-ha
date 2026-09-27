@@ -249,8 +249,8 @@ class TestGarminJrClient(unittest.TestCase):
         # Mock GPS trackpoints and messages
         client.fetch_trackpoints = MagicMock(return_value=[
             {
-                "latitude": 48.8584,
-                "longitude": 2.2945,
+                "latitude": 45.5017,
+                "longitude": -73.5673,
                 "accuracy": 8,
                 "timestamp": "2026-08-23T12:00:00Z"
             }
@@ -278,8 +278,8 @@ class TestGarminJrClient(unittest.TestCase):
         self.assertEqual(record["steps_record"], 25000)
         self.assertEqual(record["active_minutes_record"], 180)
         self.assertEqual(record["family_name"], "Test Family")
-        self.assertEqual(record["latitude"], 48.8584)
-        self.assertEqual(record["longitude"], 2.2945)
+        self.assertEqual(record["latitude"], 45.5017)
+        self.assertEqual(record["longitude"], -73.5673)
         self.assertEqual(record["gps_accuracy"], 8)
         self.assertEqual(record["last_message"], "Dinner is ready!")
         self.assertEqual(record["last_message_sender"], "Guardian")
@@ -300,8 +300,8 @@ class TestGarminJrClient(unittest.TestCase):
             {
                 "id": 101,
                 "name": "Home",
-                "latitude": 48.8500,
-                "longitude": 2.2900,
+                "latitude": 45.5000,
+                "longitude": -73.5600,
                 "radius": 150,
                 "wifi_ssid": "HomeWiFi",
                 "kid_ids": [98765432],
@@ -309,8 +309,8 @@ class TestGarminJrClient(unittest.TestCase):
             {
                 "id": 102,
                 "name": "School",
-                "latitude": 48.8600,
-                "longitude": 2.3000,
+                "latitude": 45.5100,
+                "longitude": -73.5700,
                 "radius": 200,
                 "wifi_ssid": None,
                 "kid_ids": [98765432],
@@ -319,8 +319,8 @@ class TestGarminJrClient(unittest.TestCase):
 
         client.fetch_trackpoints = MagicMock(return_value=[
             {
-                "latitude": 48.8502,
-                "longitude": 2.2901,
+                "latitude": 45.5002,
+                "longitude": -73.5601,
                 "accuracy": 20,
                 "timestamp": "2026-08-23T14:00:00Z",
                 "fixType": "Wfps",
@@ -464,14 +464,14 @@ class TestGarminJrClient(unittest.TestCase):
             format_bounce_response,
         )
 
-        user_lat, user_lon = 48.8584, 2.2945
+        user_lat, user_lon = 46.7863, -71.2541
         mock_aircraft = [
             {
                 "icao24": "c01234",
                 "callsign": "ACA890",
                 "type_code": "A223",
-                "latitude": 48.8600,
-                "longitude": 2.3000,
+                "latitude": 46.7900,
+                "longitude": -71.2500,
                 "altitude_m": 3000.0,
                 "altitude_ft": 9842.0,
             }
@@ -489,8 +489,8 @@ class TestGarminJrClient(unittest.TestCase):
             "icao24": "c09999",
             "callsign": "CGXYZ",
             "type_code": "C172",
-            "latitude": 48.8600,
-            "longitude": 2.2800,
+            "latitude": 46.7900,
+            "longitude": -71.2700,
             "altitude_m": 450.0,
             "altitude_ft": 1476.0,
         }
@@ -498,8 +498,8 @@ class TestGarminJrClient(unittest.TestCase):
             "icao24": "c08888",
             "callsign": "ACA895",
             "type_code": "B77W",
-            "latitude": 49.1000,
-            "longitude": 2.5000,
+            "latitude": 47.0500,
+            "longitude": -70.9000,
             "altitude_m": 11000.0,
             "altitude_ft": 36089.0,
         }
@@ -740,8 +740,8 @@ class TestGarminJrClient(unittest.TestCase):
         mock_coord = MagicMock()
         mock_coord.data = {
             "child_1": {
-                ATTR_LATITUDE: 48.8584,
-                ATTR_LONGITUDE: 2.2945,
+                ATTR_LATITUDE: 45.5017,
+                ATTR_LONGITUDE: -73.5673,
                 ATTR_ACCURACY: 10,
             }
         }
@@ -749,17 +749,17 @@ class TestGarminJrClient(unittest.TestCase):
         mock_entry.options = {}
 
         tracker = GarminJrTrackerEntity(mock_coord, mock_entry, "child_1")
-        self.assertEqual(tracker.latitude, 48.8584)
-        self.assertEqual(tracker.longitude, 2.2945)
+        self.assertEqual(tracker.latitude, 45.5017)
+        self.assertEqual(tracker.longitude, -73.5673)
         self.assertEqual(tracker.location_accuracy, 10)
 
         # Update data and trigger coordinator update
-        mock_coord.data["child_1"][ATTR_LATITUDE] = 48.8600
-        mock_coord.data["child_1"][ATTR_LONGITUDE] = 2.3000
+        mock_coord.data["child_1"][ATTR_LATITUDE] = 46.8139
+        mock_coord.data["child_1"][ATTR_LONGITUDE] = -71.2080
         tracker._handle_coordinator_update()
 
-        self.assertEqual(tracker.latitude, 48.8600)
-        self.assertEqual(tracker.longitude, 2.3000)
+        self.assertEqual(tracker.latitude, 46.8139)
+        self.assertEqual(tracker.longitude, -71.2080)
         print("  [OK] Device tracker zone coordinate resolution and caching verified!")
 
     def test_school_mode_opt_in_default(self):
@@ -1222,9 +1222,13 @@ class TestGarminJrClient(unittest.TestCase):
 
     def test_ai_bridge_open_garage_near_and_away(self):
         """Test that AI bridge open garage securely validates safe zone and dispatches cover service call."""
+        import concurrent.futures
+        from unittest.mock import patch
+
         from custom_components.garmin_jr.ai_bridge import GarminBounceAiBridge
 
         mock_hass = MagicMock()
+        mock_hass.loop.is_running.return_value = True
         bridge = GarminBounceAiBridge(mock_hass)
 
         # 1. Kid is Away -> blocked
@@ -1235,24 +1239,41 @@ class TestGarminJrClient(unittest.TestCase):
         }
         res_away = bridge._execute_open_garage(child_away)
         self.assertIn("Tu n'es pas à la maison", res_away)
-        mock_hass.services.call.assert_not_called()
+        mock_hass.services.async_call.assert_not_called()
 
-        # 2. Kid is Near Home (Papa) -> triggers service call with target dict
+        # 2. Kid is Near Home (Papa) -> schedules blocking async_call on HA loop
         child_home = {
             "child_id": "15839246",
             "child_name": "Benjamin",
             "garmin_safe_zone": "Papa",
         }
-        res_home = bridge._execute_open_garage(child_home)
+        ok_future = MagicMock()
+        ok_future.result.return_value = None
+        with patch(
+            "custom_components.garmin_jr.ai_bridge.asyncio.run_coroutine_threadsafe",
+            return_value=ok_future,
+        ) as mock_sched:
+            res_home = bridge._execute_open_garage(child_home)
         self.assertIn("J'ouvre la porte du garage", res_home)
-        mock_hass.services.call.assert_called_once_with(
+        mock_sched.assert_called_once()
+        mock_hass.services.async_call.assert_called_once_with(
             "cover",
             "open_cover",
-            service_data={"entity_id": "cover.garage_door"},
             target={"entity_id": "cover.garage_door"},
             blocking=True,
         )
-        print("  [OK] AI Bridge open garage safe zone verification and thread-safe service dispatch verified!")
+
+        # 3. Hung cover integration -> bounded timeout, future cancelled, error reply
+        timeout_future = MagicMock()
+        timeout_future.result.side_effect = concurrent.futures.TimeoutError()
+        with patch(
+            "custom_components.garmin_jr.ai_bridge.asyncio.run_coroutine_threadsafe",
+            return_value=timeout_future,
+        ):
+            res_timeout = bridge._execute_open_garage(child_home)
+        self.assertIn("trop de temps", res_timeout)
+        timeout_future.cancel.assert_called_once()
+        print("  [OK] AI Bridge open garage safe zone verification, thread-safe dispatch, and timeout handling verified!")
 
 
 if __name__ == "__main__":

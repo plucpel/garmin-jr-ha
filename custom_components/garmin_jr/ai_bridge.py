@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import datetime
 import json
 import logging
@@ -236,7 +237,6 @@ class GarminBounceAiBridge:
         tracker_entities = [
             f"device_tracker.garmin_jr_{child_id}_tracker",
             f"device_tracker.garmin_jr_{child_id}_location",
-            f"device_tracker.{child_name}_{child_name}_location",
             f"device_tracker.{child_name}_location",
         ]
 
@@ -258,37 +258,29 @@ class GarminBounceAiBridge:
             return "Tu n'es pas à la maison pour ouvrir le garage! 🏠"
 
         try:
-            # 1. Prefer synchronous thread-safe service call (standard for worker threads in HA)
-            if hasattr(self.hass, "services") and hasattr(self.hass.services, "call"):
-                try:
-                    self.hass.services.call(
-                        "cover",
-                        "open_cover",
-                        service_data={"entity_id": "cover.garage_door"},
-                        target={"entity_id": "cover.garage_door"},
-                        blocking=True,
-                    )
-                    _LOGGER.info("Garmin Jr: Successfully triggered cover.open_cover for cover.garage_door via services.call")
-                    return "J'ouvre la porte du garage! 🚪 Sois prudent!"
-                except Exception as sync_err:
-                    _LOGGER.debug("Direct services.call failed, attempting async_call via run_coroutine_threadsafe: %s", sync_err)
-
-            # 2. Fallback to async_call scheduled and awaited on the HA main event loop
-            if hasattr(self.hass, "services") and hasattr(self.hass.services, "async_call"):
-                coro = self.hass.services.async_call(
+            # Schedule the blocking service call on the HA main event loop and await
+            # it from this worker thread with a bounded timeout, so a hung cover
+            # integration cannot block the executor thread indefinitely.
+            if not (hasattr(self.hass, "services") and hasattr(self.hass.services, "async_call")):
+                raise RuntimeError("Home Assistant service registry unavailable")
+            if not (hasattr(self.hass, "loop") and self.hass.loop.is_running()):
+                raise RuntimeError("Home Assistant event loop is not running")
+            future = asyncio.run_coroutine_threadsafe(
+                self.hass.services.async_call(
                     "cover",
                     "open_cover",
-                    service_data={"entity_id": "cover.garage_door"},
                     target={"entity_id": "cover.garage_door"},
                     blocking=True,
-                )
-                if asyncio.iscoroutine(coro) and hasattr(self.hass, "loop") and self.hass.loop.is_running():
-                    future = asyncio.run_coroutine_threadsafe(coro, self.hass.loop)
-                    future.result(timeout=10)
-                elif asyncio.iscoroutine(coro):
-                    asyncio.run(coro)
-
-            _LOGGER.info("Garmin Jr: Successfully triggered cover.open_cover for cover.garage_door via async_call")
+                ),
+                self.hass.loop,
+            )
+            try:
+                future.result(timeout=10)
+            except concurrent.futures.TimeoutError:
+                future.cancel()
+                _LOGGER.error("Timed out waiting for cover.open_cover on the Home Assistant event loop")
+                return "Le garage met trop de temps à répondre! ⏳"
+            _LOGGER.info("Garmin Jr: Successfully triggered cover.open_cover for cover.garage_door")
             return "J'ouvre la porte du garage! 🚪 Sois prudent!"
         except Exception as err:
             _LOGGER.error("Failed to open garage door via service call: %s", err)
