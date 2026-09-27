@@ -1220,6 +1220,40 @@ class TestGarminJrClient(unittest.TestCase):
         self.assertTrue(res_orphaned)
         print("  [OK] async_remove_config_entry_device active vs orphaned device removal verified!")
 
+    def test_ai_bridge_open_garage_near_and_away(self):
+        """Test that AI bridge open garage securely validates safe zone and dispatches cover service call."""
+        from custom_components.garmin_jr.ai_bridge import GarminBounceAiBridge
+
+        mock_hass = MagicMock()
+        bridge = GarminBounceAiBridge(mock_hass)
+
+        # 1. Kid is Away -> blocked
+        child_away = {
+            "child_id": "15839246",
+            "child_name": "Benjamin",
+            "garmin_safe_zone": "École",
+        }
+        res_away = bridge._execute_open_garage(child_away)
+        self.assertIn("Tu n'es pas à la maison", res_away)
+        mock_hass.services.call.assert_not_called()
+
+        # 2. Kid is Near Home (Papa) -> triggers service call with target dict
+        child_home = {
+            "child_id": "15839246",
+            "child_name": "Benjamin",
+            "garmin_safe_zone": "Papa",
+        }
+        res_home = bridge._execute_open_garage(child_home)
+        self.assertIn("J'ouvre la porte du garage", res_home)
+        mock_hass.services.call.assert_called_once_with(
+            "cover",
+            "open_cover",
+            service_data={"entity_id": "cover.garage_door"},
+            target={"entity_id": "cover.garage_door"},
+            blocking=True,
+        )
+        print("  [OK] AI Bridge open garage safe zone verification and thread-safe service dispatch verified!")
+
 
 if __name__ == "__main__":
     unittest.main()
