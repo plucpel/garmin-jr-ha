@@ -36,7 +36,7 @@ from .const import (
 from .garmin_client import GarminJrAuthError, GarminJrClient, GarminJrConnectionError
 from .plane_spotter import prefetch_airspace_sync
 
-FAST_MESSAGE_POLL_INTERVAL_SECONDS = 5
+FAST_MESSAGE_POLL_INTERVAL_SECONDS = 10
 
 
 def resolve_child_profile_pk(
@@ -251,6 +251,8 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
         self._rapid_retry_unsub: CALLBACK_TYPE | None = None
         self._conversation_burst_until: float = 0.0
         self._burst_poll_unsub: CALLBACK_TYPE | None = None
+        self._is_updating: bool = False
+        self._last_msg_fetch_ts: float = 0.0
 
         # Load persisted learned child profile PKs from config entry options
         saved_pks = entry.options.get(CONF_CHILD_PROFILE_PKS, {})
@@ -496,7 +498,17 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
             self.hass.async_create_task(self.async_request_refresh())
             return
 
-        # 3. Active: Poll messages
+        # 3. Active: Poll messages (skip if full coordinator refresh is in flight or ran within 4s, or if GCS rate-limited)
+        if self._is_updating:
+            LOGGER.debug("Garmin Jr: Skipping fast message poll while full coordinator update is in progress")
+            return
+        if (now_ts - self._last_msg_fetch_ts) < 4.0:
+            return
+        if now_ts < getattr(self.client, "_gcs_rate_limited_until", 0.0):
+            LOGGER.debug("Garmin Jr: Skipping fast message poll during GCS rate-limit cooldown")
+            return
+
+        self._last_msg_fetch_ts = now_ts
         try:
             recent_messages = await self.hass.async_add_executor_job(
                 self.client.fetch_messages, None, 100
@@ -597,6 +609,7 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
 
     async def _async_update_data(self) -> dict[str, dict[str, Any]]:
         """Fetch data from Garmin API in executor."""
+        self._is_updating = True
         try:
             data = await self.hass.async_add_executor_job(self.client.fetch_all_data)
 
@@ -653,4 +666,7 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
         except Exception as err:
             LOGGER.exception("Unexpected error fetching Garmin Jr data: %s", err)
             raise UpdateFailed(f"Unexpected error: {err}") from err
+        finally:
+            self._is_updating = False
+            self._last_msg_fetch_ts = time.time()
 

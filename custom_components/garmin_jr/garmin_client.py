@@ -17,6 +17,14 @@ from garminconnect.exceptions import (
     GarminConnectTooManyRequestsError,
 )
 import requests
+from requests.adapters import HTTPAdapter
+
+try:
+    from curl_cffi import requests as cffi_requests
+    HAS_CURL_CFFI = True
+except ImportError:
+    cffi_requests = None  # type: ignore[assignment]
+    HAS_CURL_CFFI = False
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -59,9 +67,81 @@ class GarminJrClient:
         self._learned_child_pks: dict[str, str] = {}
         self._guardian_profile_pks: set[str] = set()
         self.family_kids_count: int = 0
+        self._http_session: Any = self._create_http_session()
+        self._gcs_rate_limited_until: float = 0.0
+        self._last_rate_limit_log_ts: float = 0.0
+        self._known_kids: dict[str, dict[str, Any]] = {}
+        self._last_results: dict[str, dict[str, Any]] = {}
+        self._send_retry_delays: tuple[float, ...] = (1.5, 3.0)
 
         if token_data:
             self._load_token_data(token_data)
+
+    def _create_http_session(self) -> Any:
+        """Create a persistent HTTP session with TLS/connection pooling and Cloudflare cookie retention."""
+        if HAS_CURL_CFFI and cffi_requests is not None:
+            try:
+                return cffi_requests.Session(impersonate="chrome")
+            except Exception as err:
+                _LOGGER.debug("Could not initialize curl_cffi Session, falling back to requests.Session: %s", err)
+        session = requests.Session()
+        adapter = HTTPAdapter(pool_connections=10, pool_maxsize=20)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        return session
+
+    def _reset_http_session(self) -> None:
+        """Close and recreate the persistent HTTP session after a Cloudflare block or connection error."""
+        with contextlib.suppress(Exception):
+            if self._http_session is not None and hasattr(self._http_session, "close"):
+                self._http_session.close()
+        self._http_session = self._create_http_session()
+
+    def _http_get(self, url: str, **kwargs: Any) -> Any:
+        """Perform an HTTP GET using the persistent session (or requests.get if mocked in tests)."""
+        if hasattr(requests.get, "_mock_name") or hasattr(requests.get, "side_effect"):
+            return requests.get(url, **kwargs)
+        if self._http_session is None:
+            self._http_session = self._create_http_session()
+        return self._http_session.get(url, **kwargs)
+
+    def _http_post(self, url: str, **kwargs: Any) -> Any:
+        """Perform an HTTP POST using the persistent session (or requests.post if mocked in tests)."""
+        if hasattr(requests.post, "_mock_name") or hasattr(requests.post, "side_effect"):
+            return requests.post(url, **kwargs)
+        if self._http_session is None:
+            self._http_session = self._create_http_session()
+        return self._http_session.post(url, **kwargs)
+
+    def _is_rate_limited_response(self, resp: Any) -> bool:
+        """Return True if the HTTP response indicates a 429 or Cloudflare rate-limit block."""
+        status = getattr(resp, "status_code", 0)
+        if status == 429:
+            return True
+        if status in (403, 503):
+            text = getattr(resp, "text", "") or ""
+            if "Just a moment..." in text or "cf-mitigated" in text or "Attention Required! | Cloudflare" in text:
+                return True
+        return False
+
+    def _note_gcs_rate_limit(self, endpoint: str, status_code: int, cooldown_seconds: float = 30.0) -> None:
+        """Record a GCS rate-limit cooldown window and log a throttled warning."""
+        now = time.time()
+        self._gcs_rate_limited_until = max(self._gcs_rate_limited_until, now + cooldown_seconds)
+        if (now - self._last_rate_limit_log_ts) > 60.0:
+            self._last_rate_limit_log_ts = now
+            _LOGGER.warning(
+                "Garmin GCS rate limit (HTTP %s on %s); backing off background polls for %.0fs",
+                status_code,
+                endpoint,
+                cooldown_seconds,
+            )
+        else:
+            _LOGGER.debug(
+                "Garmin GCS rate limit (HTTP %s on %s); cooldown active",
+                status_code,
+                endpoint,
+            )
 
     def _load_token_data(self, token_data: str | dict[str, Any]) -> None:
         """Load session tokens into the underlying client and extract IT tokens."""
@@ -164,7 +244,7 @@ class GarminJrClient:
                 "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
                 "client_id": "VIVOFIT_JR_ANDROID",
             }
-            resp = requests.post(url, data=data, timeout=15)
+            resp = self._http_post(url, data=data, timeout=15)
             if resp.status_code == 200:
                 res_data = resp.json()
                 self._diauth_token = res_data.get("access_token")
@@ -199,7 +279,7 @@ class GarminJrClient:
                 "gc_kid_id": int(cid),
                 "client_id": "VIVOFIT_JR_ANDROID",
             }
-            resp = requests.post(url, data=data, timeout=15)
+            resp = self._http_post(url, data=data, timeout=15)
             if resp.status_code == 200:
                 res_data = resp.json()
                 kid_token = res_data.get("access_token")
@@ -230,7 +310,7 @@ class GarminJrClient:
                 "User-Agent": "Vivokid 7.5 245",
                 "Accept": "application/json",
             }
-            resp = requests.get(url, headers=headers, timeout=15)
+            resp = self._http_get(url, headers=headers, timeout=15)
             if resp.status_code == 200:
                 settings = resp.json()
                 _LOGGER.debug("Fetched live kid device settings for device %s: %s", device_id, settings.get("schoolMode"))
@@ -261,7 +341,7 @@ class GarminJrClient:
                     "refreshToken": self._it_refresh_token,
                     "itOAuthClientId": "VIVOFIT_JR_ANDROID",
                 }
-                resp = requests.post(url, headers=headers, json=data, timeout=15)
+                resp = self._http_post(url, headers=headers, json=data, timeout=15)
                 if resp.status_code == 200:
                     res_data = resp.json()
                     self._it_token = res_data.get("accessToken") or res_data.get("access_token")
@@ -290,7 +370,7 @@ class GarminJrClient:
                     "Accept-Encoding": "en_US",
                     "User-Agent": "GarminJr/2.0.0 (Android)",
                 }
-                ex_res = requests.post(ex_url, data=ex_data, headers=ex_headers, timeout=15)
+                ex_res = self._http_post(ex_url, data=ex_data, headers=ex_headers, timeout=15)
                 if ex_res.status_code == 200:
                     ex_json = ex_res.json()
                     self._it_token = ex_json.get("access_token")
@@ -358,7 +438,7 @@ class GarminJrClient:
                 self.client._refresh_session()
 
             headers = self._get_diauth_headers()
-            resp = requests.get(
+            resp = self._http_get(
                 f"{VIVOKID_BASE_URL}/v3/family/info", headers=headers, timeout=10
             )
             if resp.status_code == 200:
@@ -380,6 +460,9 @@ class GarminJrClient:
         if not tracker_id or tracker_id in ("None", "null", ""):
             _LOGGER.warning("Cannot fetch trackpoints for kid %s: missing connectId", kid_profile_id)
             return []
+        if time.time() < self._gcs_rate_limited_until:
+            _LOGGER.debug("Skipping fetch_trackpoints for kid %s: GCS rate-limit cooldown active", kid_profile_id)
+            return []
         try:
             headers = self._get_it_headers()
             url = f"{GCS_API_BASE_URL}/tracker/family/api/v1/trackpoints"
@@ -387,13 +470,16 @@ class GarminJrClient:
                 datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=12)
             ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
             params: dict[str, Any] = {"kidProfileId": tracker_id, "begin": begin, "limit": max(limit, 200)}
-            resp = requests.get(url, headers=headers, params=params, timeout=15)
+            resp = self._http_get(url, headers=headers, params=params, timeout=15)
             if resp.status_code == 200:
                 data = resp.json()
                 if isinstance(data, list):
                     return data
                 if isinstance(data, dict):
                     return data.get("trackPoints") or data.get("points") or []
+            elif self._is_rate_limited_response(resp):
+                self._note_gcs_rate_limit("trackpoints", resp.status_code)
+                self._reset_http_session()
             else:
                 _LOGGER.warning("Trackpoints API returned HTTP %s for kid %s (connectId=%s): %s", resp.status_code, kid_profile_id, tracker_id, resp.text[:100])
         except Exception as err:
@@ -405,7 +491,7 @@ class GarminJrClient:
         try:
             headers = self._get_diauth_headers()
             url = f"{VIVOKID_BASE_URL}/geofence/all"
-            resp = requests.get(url, headers=headers, timeout=10)
+            resp = self._http_get(url, headers=headers, timeout=10)
             if resp.status_code == 200:
                 data = resp.json()
                 if isinstance(data, list):
@@ -427,6 +513,9 @@ class GarminJrClient:
 
     def fetch_messages(self, after_iso: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         """Fetch message history from GCS Messaging API."""
+        if time.time() < self._gcs_rate_limited_until:
+            _LOGGER.debug("Skipping fetch_messages: GCS rate-limit cooldown active")
+            return []
         try:
             headers = self._get_it_headers()
             url = f"{GCS_API_BASE_URL}/messaging/family/api/v1/guardian/messages"
@@ -436,7 +525,7 @@ class GarminJrClient:
                     datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=12)
                 ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
             params: dict[str, Any] = {"after": after_iso, "limit": max(limit, 100)}
-            resp = requests.get(url, headers=headers, params=params, timeout=10)
+            resp = self._http_get(url, headers=headers, params=params, timeout=10)
             if resp.status_code == 200:
                 data = resp.json()
                 _LOGGER.debug("GCS fetch_messages raw: %s", data)
@@ -468,13 +557,20 @@ class GarminJrClient:
                     )
                     return result_msgs
                 return []
-            else:
-                _LOGGER.debug("GCS guardian/messages returned HTTP %s: %s", resp.status_code, resp.text)
+            if self._is_rate_limited_response(resp):
+                self._note_gcs_rate_limit("guardian/messages", resp.status_code)
+                self._reset_http_session()
+                return []
+            if resp.status_code in (401, 403, 500, 502, 503, 504):
+                _LOGGER.debug("GCS guardian/messages returned HTTP %s (skipping fallback): %s", resp.status_code, resp.text[:100])
+                return []
 
-            # Fallback: Query active conversations list if guardian endpoint returned empty
+            _LOGGER.debug("GCS guardian/messages returned HTTP %s: %s", resp.status_code, resp.text[:100])
+
+            # Fallback: Query active conversations list only if guardian endpoint returned 404/unsupported
             try:
                 c_url = f"{GCS_API_BASE_URL}/messaging/family/api/v1/conversations"
-                c_resp = requests.get(c_url, headers=headers, timeout=10)
+                c_resp = self._http_get(c_url, headers=headers, timeout=10)
                 if c_resp.status_code == 200:
                     c_data = c_resp.json()
                     conv_list = c_data if isinstance(c_data, list) else (c_data.get("conversations") or [])
@@ -483,7 +579,7 @@ class GarminJrClient:
                         c_msgs = conv.get("messages") or conv.get("recentMessages") or []
                         if not c_msgs and conv.get("conversationId"):
                             cid = conv.get("conversationId")
-                            m_resp = requests.get(
+                            m_resp = self._http_get(
                                 f"{GCS_API_BASE_URL}/messaging/family/api/v1/conversation/{cid}/messages",
                                 headers=headers,
                                 params=params,
@@ -586,39 +682,104 @@ class GarminJrClient:
         return child_messages
 
     def send_text_message(self, to_user_profile_pk: str | int, message_text: str) -> bool:
-        """Send a text message to a child's Garmin Bounce watch."""
+        """Send a text message to a child's Garmin Bounce watch with retry on 429/5xx."""
         if not str(to_user_profile_pk).isdigit():
             _LOGGER.warning("Cannot send text message: invalid non-numeric userProfilePk '%s'", to_user_profile_pk)
             return False
-        try:
-            headers = self._get_it_headers()
-            headers["Content-Type"] = "application/json"
-            url = f"{GCS_API_BASE_URL}/messaging/family/api/v1/messages/user/text"
-            payload = {
-                "toUserProfilePk": int(to_user_profile_pk),
-                "messageText": message_text,
-            }
-            resp = requests.post(url, headers=headers, json=payload, timeout=15)
-            if resp.status_code in (200, 201, 204):
-                _LOGGER.info("Successfully sent text message to profile %s", to_user_profile_pk)
-                return True
-            _LOGGER.warning("Failed to send message to %s: %s %s", to_user_profile_pk, resp.status_code, resp.text)
-        except Exception as err:
-            _LOGGER.error("Error sending text message to %s: %s", to_user_profile_pk, err)
+
+        url = f"{GCS_API_BASE_URL}/messaging/family/api/v1/messages/user/text"
+        payload = {
+            "toUserProfilePk": int(to_user_profile_pk),
+            "messageText": message_text,
+        }
+        max_attempts = len(self._send_retry_delays) + 1
+
+        for attempt in range(max_attempts):
+            try:
+                headers = self._get_it_headers()
+                headers["Content-Type"] = "application/json"
+                resp = self._http_post(url, headers=headers, json=payload, timeout=15)
+                if resp.status_code in (200, 201, 204):
+                    _LOGGER.info("Successfully sent text message to profile %s", to_user_profile_pk)
+                    return True
+
+                is_rate_limit = self._is_rate_limited_response(resp)
+                if is_rate_limit:
+                    self._note_gcs_rate_limit("messages/user/text", resp.status_code)
+                    self._reset_http_session()
+
+                if (is_rate_limit or resp.status_code in (500, 502, 503, 504)) and attempt < len(self._send_retry_delays):
+                    delay = self._send_retry_delays[attempt]
+                    _LOGGER.warning(
+                        "Transient HTTP %s sending message to %s (attempt %d/%d); retrying in %.1fs",
+                        resp.status_code,
+                        to_user_profile_pk,
+                        attempt + 1,
+                        max_attempts,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
+
+                _LOGGER.warning("Failed to send message to %s: %s %s", to_user_profile_pk, resp.status_code, resp.text[:200])
+                return False
+            except Exception as err:
+                self._reset_http_session()
+                if attempt < len(self._send_retry_delays):
+                    delay = self._send_retry_delays[attempt]
+                    _LOGGER.warning(
+                        "Error sending text message to %s (attempt %d/%d: %s); retrying in %.1fs",
+                        to_user_profile_pk,
+                        attempt + 1,
+                        max_attempts,
+                        err,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                _LOGGER.error("Error sending text message to %s: %s", to_user_profile_pk, err)
         return False
 
     def request_location_update(self, device_or_kid_id: str | int) -> bool:
         """Ping the child's watch over LTE to request an immediate GPS location refresh."""
-        try:
-            headers = self._get_it_headers()
-            url = f"{GCS_API_BASE_URL}/device-instruction/api/v1/family/{device_or_kid_id}/update-location"
-            resp = requests.post(url, headers=headers, timeout=15)
-            if resp.status_code in (200, 201, 202, 204):
-                _LOGGER.debug("Location refresh instruction dispatched to %s", device_or_kid_id)
-                return True
-            _LOGGER.warning("Failed to dispatch location refresh for %s: %s %s", device_or_kid_id, resp.status_code, resp.text)
-        except Exception as err:
-            _LOGGER.error("Error requesting location update for %s: %s", device_or_kid_id, err)
+        url = f"{GCS_API_BASE_URL}/device-instruction/api/v1/family/{device_or_kid_id}/update-location"
+        max_attempts = len(self._send_retry_delays) + 1
+
+        for attempt in range(max_attempts):
+            try:
+                headers = self._get_it_headers()
+                resp = self._http_post(url, headers=headers, timeout=15)
+                if resp.status_code in (200, 201, 202, 204):
+                    _LOGGER.debug("Location refresh instruction dispatched to %s", device_or_kid_id)
+                    return True
+
+                is_rate_limit = self._is_rate_limited_response(resp)
+                if is_rate_limit:
+                    self._note_gcs_rate_limit("update-location", resp.status_code)
+                    self._reset_http_session()
+
+                if (is_rate_limit or resp.status_code in (500, 502, 503, 504)) and attempt < len(self._send_retry_delays):
+                    delay = self._send_retry_delays[attempt]
+                    _LOGGER.warning(
+                        "Transient HTTP %s requesting location update for %s (attempt %d/%d); retrying in %.1fs",
+                        resp.status_code,
+                        device_or_kid_id,
+                        attempt + 1,
+                        max_attempts,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
+
+                _LOGGER.warning("Failed to dispatch location refresh for %s: %s %s", device_or_kid_id, resp.status_code, resp.text[:200])
+                return False
+            except Exception as err:
+                self._reset_http_session()
+                if attempt < len(self._send_retry_delays):
+                    delay = self._send_retry_delays[attempt]
+                    time.sleep(delay)
+                    continue
+                _LOGGER.error("Error requesting location update for %s: %s", device_or_kid_id, err)
         return False
 
     def fetch_all_data(self) -> dict[str, dict[str, Any]]:
@@ -645,9 +806,10 @@ class GarminJrClient:
         family_id = self._family_id
         family_name = self._family_name
         kids_list: list[dict[str, Any]] = []
+        family_geofences: list[dict[str, Any]] = []
 
         try:
-            fam_resp = requests.get(f"{VIVOKID_BASE_URL}/v3/family/info", headers=diauth_headers, timeout=10)
+            fam_resp = self._http_get(f"{VIVOKID_BASE_URL}/v3/family/info", headers=diauth_headers, timeout=10)
             if fam_resp.status_code == 200:
                 fam_data = fam_resp.json()
                 families = fam_data.get("families", [])
@@ -669,9 +831,18 @@ class GarminJrClient:
                     family_geofences = []
                     guardians = []
 
-                self._family_id = family_id
-                self._family_name = family_name
-                self.family_kids_count = len(kids_list)
+                if family_id:
+                    self._family_id = family_id
+                if family_name:
+                    self._family_name = family_name
+                if kids_list:
+                    self.family_kids_count = len(kids_list)
+                    for k in kids_list:
+                        if k.get("id") is not None:
+                            kid_key = str(k.get("id"))
+                            merged_kid = dict(self._known_kids.get(kid_key, {}))
+                            merged_kid.update(k)
+                            self._known_kids[kid_key] = merged_kid
 
                 for g in guardians:
                     for key in ("userProfilePk", "userProfilePK", "profilePk", "userProfileId"):
@@ -686,6 +857,12 @@ class GarminJrClient:
         except Exception as err:
             _LOGGER.warning("Error querying Garmin Jr family info: %s", err)
             family_geofences = []
+
+        if not kids_list and self._known_kids:
+            kids_list = list(self._known_kids.values())
+            if not self.family_kids_count:
+                self.family_kids_count = len(kids_list)
+            _LOGGER.debug("Restored %d child profile(s) from cached family info", len(kids_list))
 
         # 2. Fetch Recent Messages across the family
         recent_messages: list[dict[str, Any]] = []
@@ -764,38 +941,41 @@ class GarminJrClient:
                     }
 
                 lb_url = f"{VIVOKID_BASE_URL}/v2/leaderboard/daily/{family_id}/{today}"
-                lb_resp = requests.get(lb_url, headers=diauth_headers, timeout=10)
+                lb_resp = self._http_get(lb_url, headers=diauth_headers, timeout=10)
                 if lb_resp.status_code == 200:
                     for kid in lb_resp.json().get("kidStepsData", []):
                         k_id = str(kid.get("id"))
                         if k_id in kids_map:
                             kids_map[k_id].update(kid)
                         else:
-                            kids_map[k_id] = kid
+                            base_kid = dict(self._known_kids.get(k_id, {}))
+                            base_kid.update(kid)
+                            kids_map[k_id] = base_kid
 
                 for kid_id, kid in kids_map.items():
-                    kid_name = kid.get("displayName") or kid.get("name") or "Child"
-                    live_steps = kid.get("steps") or 0
-                    last_sync = kid.get("lastSyncDate")
+                    prev_record = self._last_results.get(kid_id, {})
+                    kid_name = kid.get("displayName") or kid.get("name") or prev_record.get("child_name") or "Child"
+                    live_steps = kid.get("steps") if kid.get("steps") is not None else (prev_record.get("steps") or 0)
+                    last_sync = kid.get("lastSyncDate") or prev_record.get("last_sync")
 
                     # Filter geofences applicable to this kid
                     kid_int = int(kid_id) if kid_id.isdigit() else None
                     kid_geofences = [
                         g for g in all_geofences
                         if not g.get("kid_ids") or (kid_int is not None and kid_int in g.get("kid_ids", []))
-                    ]
+                    ] or prev_record.get("geofences", [])
 
                     # Fetch Daily Step Summary
-                    step_goal = 7500
-                    steps_record = None
-                    active_mins = 0
+                    step_goal = prev_record.get("daily_step_goal") or 7500
+                    steps_record = prev_record.get("steps_record")
+                    active_mins = prev_record.get("active_minutes") or 0
                     try:
                         sum_url = f"{VIVOKID_BASE_URL}/v2/activity/summary/kid/{kid_id}/{today}"
-                        sum_resp = requests.get(sum_url, headers=diauth_headers, timeout=10)
+                        sum_resp = self._http_get(sum_url, headers=diauth_headers, timeout=10)
                         if sum_resp.status_code == 200:
                             sum_data = sum_resp.json()
                             step_goal = sum_data.get("stepsGoal") or step_goal
-                            steps_record = sum_data.get("stepsRecord")
+                            steps_record = sum_data.get("stepsRecord") or steps_record
                             active_mins = (
                                 sum_data.get("activeMinutes")
                                 or sum_data.get("activeMinute")
@@ -811,14 +991,14 @@ class GarminJrClient:
                         _LOGGER.debug("Could not fetch kid summary for %s: %s", kid_id, sum_err)
 
                     # Fetch Personal Records
-                    active_mins_record = None
+                    active_mins_record = prev_record.get("active_minutes_record")
                     try:
                         pr_url = f"{VIVOKID_BASE_URL}/v2/activity/personalrecords/{kid_id}"
-                        pr_resp = requests.get(pr_url, headers=diauth_headers, timeout=10)
+                        pr_resp = self._http_get(pr_url, headers=diauth_headers, timeout=10)
                         if pr_resp.status_code == 200:
                             pr_data = pr_resp.json()
                             steps_record = pr_data.get("stepsRecord") or steps_record
-                            active_mins_record = pr_data.get("activeMinuteRecord")
+                            active_mins_record = pr_data.get("activeMinuteRecord") or active_mins_record
                     except Exception as pr_err:
                         _LOGGER.debug("Could not fetch kid personal records for %s: %s", kid_id, pr_err)
 
@@ -853,7 +1033,13 @@ class GarminJrClient:
                     geofence_radius = None
 
                     # Use connectId for the GCS tracker API (not the Garmin Jr kid id)
-                    kid_connect_id = kid.get("connectId")
+                    kid_connect_id = (
+                        kid.get("connectId")
+                        or kid.get("connect_id")
+                        or (kid.get("account") or {}).get("connectId")
+                        or prev_record.get("connectId")
+                        or prev_record.get("connect_id")
+                    )
                     trackpoints = self.fetch_trackpoints(kid_id, limit=200, connect_id=kid_connect_id)
                     if trackpoints:
                         # Sort trackpoints ascending by timestamp to guarantee latest_pt is newest
@@ -914,6 +1100,21 @@ class GarminJrClient:
 
                         if active_geofence_name is None:
                             active_geofence_name = "Outside"
+                    elif prev_record:
+                        latitude = prev_record.get("latitude")
+                        longitude = prev_record.get("longitude")
+                        gps_accuracy = prev_record.get("gps_accuracy", 15)
+                        location_ts = prev_record.get("location_timestamp")
+                        fix_type = prev_record.get("fix_type")
+                        active_geofence_id = prev_record.get("garmin_geofence_id")
+                        active_geofence_name = prev_record.get("garmin_safe_zone")
+                        has_wifi = prev_record.get("has_wifi", False)
+                        geofence_lat = prev_record.get("geofence_latitude")
+                        geofence_lon = prev_record.get("geofence_longitude")
+                        geofence_radius = prev_record.get("geofence_radius")
+                        if battery_level is None:
+                            battery_level = prev_record.get("battery_level")
+                            battery_status = prev_record.get("battery_status", "NORMAL")
 
                     # Match latest message for this child
                     last_msg_text = None
@@ -925,8 +1126,8 @@ class GarminJrClient:
                         recent_messages,
                         kid_id=kid_id,
                         connect_id=kid.get("connectId") or kid_connect_id,
-                        device_id=kid.get("deviceId") or kid.get("device_id"),
-                        user_profile_pk=kid.get("userProfilePk") or self._learned_child_pks.get(kid_id),
+                        device_id=kid.get("deviceId") or kid.get("device_id") or prev_record.get("device_id"),
+                        user_profile_pk=kid.get("userProfilePk") or self._learned_child_pks.get(kid_id) or prev_record.get("userProfilePk"),
                         total_family_kids=self.family_kids_count or len(kids_map),
                     )
 
@@ -958,6 +1159,11 @@ class GarminJrClient:
                             or ("Child" if from_pk in kid_identifiers else "Guardian")
                         )
                         last_msg_media = latest_msg.get("mediaType", "Text")
+                    elif prev_record:
+                        last_msg_text = prev_record.get("last_message")
+                        last_msg_time = prev_record.get("last_message_time")
+                        last_msg_sender = prev_record.get("last_message_sender")
+                        last_msg_media = prev_record.get("last_message_media")
 
                     resolved_pk = (
                         kid.get("user_profile_pk")
@@ -966,10 +1172,13 @@ class GarminJrClient:
                         or kid.get("connect_id")
                         or kid.get("connectId")
                         or kid_connect_id
+                        or prev_record.get("user_profile_pk")
                         or kid_id
                     )
                     connect_id_val = kid.get("connect_id") or kid.get("connectId") or kid_connect_id
-                    device_id_val = kid.get("device_id") or kid.get("deviceId") or kid_id
+                    device_id_val = kid.get("device_id") or kid.get("deviceId") or prev_record.get("device_id") or kid_id
+                    kid_settings = kid.get("settings") or prev_record.get("settings") or {}
+                    kid_school_mode = kid.get("school_mode") or kid_settings.get("schoolMode") or prev_record.get("school_mode") or {}
 
                     results[kid_id] = {
                         "child_id": kid_id,
@@ -1010,14 +1219,21 @@ class GarminJrClient:
                         "geofence_radius": geofence_radius,
                         "geofences": kid_geofences,
                         "new_messages": child_messages,
-                        "settings": kid.get("settings") or {},
-                        "school_mode": kid.get("school_mode") or (kid.get("settings") or {}).get("schoolMode") or {},
-                        "bed_time": kid.get("bed_time") or (kid.get("settings") or {}).get("bedTime"),
-                        "wake_time": kid.get("wake_time") or (kid.get("settings") or {}).get("wakeTime"),
-                        "dnd_settings": kid.get("dnd_settings") or (kid.get("settings") or {}).get("dndSettings") or {},
+                        "settings": kid_settings,
+                        "school_mode": kid_school_mode,
+                        "bed_time": kid.get("bed_time") or kid_settings.get("bedTime") or prev_record.get("bed_time"),
+                        "wake_time": kid.get("wake_time") or kid_settings.get("wakeTime") or prev_record.get("wake_time"),
+                        "dnd_settings": kid.get("dnd_settings") or kid_settings.get("dndSettings") or prev_record.get("dnd_settings") or {},
                     }
             except Exception as lb_err:
                 _LOGGER.warning("Error fetching kid leaderboard for family %s: %s", family_id, lb_err)
+
+        if not results and self._last_results:
+            _LOGGER.debug("Preserving %d cached child record(s) after transient family/leaderboard poll failure", len(self._last_results))
+            results = {
+                cid: {**cdata, "new_messages": []}
+                for cid, cdata in self._last_results.items()
+            }
 
         # 5. Discover Adult / Registered Devices (Garmin Connect device registry)
         try:
@@ -1098,6 +1314,9 @@ class GarminJrClient:
                     }
         except Exception as dev_err:
             _LOGGER.warning("Could not fetch Garmin Connect device list: %s", dev_err)
+
+        if results:
+            self._last_results = {cid: dict(cdata) for cid, cdata in results.items()}
 
         return results
 

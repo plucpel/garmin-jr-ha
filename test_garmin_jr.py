@@ -1308,6 +1308,123 @@ class TestGarminJrClient(unittest.TestCase):
 
         print("  [OK] AI Bridge open garage safe zone verification, non-blocking dispatch, GPS proximity, and natural phrasing intent verified!")
 
+    @patch("custom_components.garmin_jr.garmin_client.requests.post")
+    @patch("custom_components.garmin_jr.garmin_client.requests.get")
+    def test_cloudflare_429_retry_and_state_preservation(self, mock_requests_get, mock_requests_post):
+        """Test 429 retry with backoff on send_text_message, no fallback storm on fetch_messages, and state preservation."""
+        import time
+        client = GarminJrClient(token_data={"di_token": "mock", "it_token": "mock_it"})
+        client.client.di_token = "mock"
+        client._it_token = "mock_it"
+        client._it_expires_at = time.time() + 3600
+        client.client._token_expires_soon = MagicMock(return_value=False)
+        client._send_retry_delays = (0.01, 0.02)
+
+        class MockResponse:
+            def __init__(self, status_code, json_data=None, text=""):
+                self.status_code = status_code
+                self._json = json_data or {}
+                self.text = text
+
+            def json(self):
+                return self._json
+
+        # 1. Test send_text_message retrying after HTTP 429 and succeeding on attempt 2
+        post_calls = []
+
+        def mock_post(url, **kwargs):
+            post_calls.append(url)
+            if len(post_calls) == 1:
+                return MockResponse(429, text="<!DOCTYPE html><title>Just a moment...</title>")
+            return MockResponse(200, {"status": "SENT"})
+
+        mock_requests_post.side_effect = mock_post
+        sent_ok = client.send_text_message(137662175, "Air Canada (ACA890) Airbus A220")
+        self.assertTrue(sent_ok)
+        self.assertEqual(len(post_calls), 2, "send_text_message must retry after 429 and succeed")
+
+        # Reset rate-limit cooldown for next check
+        client._gcs_rate_limited_until = 0.0
+
+        # 2. Test fetch_messages aborting on 429 without hitting /conversations fallback
+        get_urls = []
+
+        def mock_get_429(url, **kwargs):
+            get_urls.append(url)
+            return MockResponse(429, text="Just a moment...")
+
+        mock_requests_get.side_effect = mock_get_429
+        msgs = client.fetch_messages()
+        self.assertEqual(msgs, [])
+        self.assertEqual(len(get_urls), 1, "fetch_messages must not hit /conversations fallback on 429")
+        self.assertGreater(client._gcs_rate_limited_until, time.time())
+
+        # Reset cooldown for state preservation test
+        client._gcs_rate_limited_until = 0.0
+
+        # 3. Test state and connectId preservation across transient partial poll failures
+        family_info_ok = True
+
+        def mock_get_poll(url, **kwargs):
+            if "v3/family/info" in url:
+                if family_info_ok:
+                    return MockResponse(200, {
+                        "status": "OK",
+                        "families": [{
+                            "familyId": 777,
+                            "name": "Pelletier",
+                            "kids": [{
+                                "id": 15839246,
+                                "name": "Benjamin",
+                                "connectId": 137662175,
+                                "deviceId": "3617969920",
+                            }]
+                        }]
+                    })
+                return MockResponse(503, text="Service Unavailable")
+            if "leaderboard/daily" in url:
+                return MockResponse(200, {
+                    "kidStepsData": [{"id": 15839246, "displayName": "Benjamin", "steps": 4200}]
+                })
+            return MockResponse(200, {})
+
+        mock_requests_get.side_effect = mock_get_poll
+        client.client.connectapi = MagicMock(return_value=[])
+        client.fetch_geofences = MagicMock(return_value=[])
+        client.fetch_trackpoints = MagicMock(return_value=[{
+            "latitude": 46.7863,
+            "longitude": -71.2541,
+            "accuracy": 10,
+            "timestamp": "2026-11-06T20:00:00Z",
+        }])
+        client.fetch_messages = MagicMock(return_value=[{
+            "messageId": "msg-plane-1",
+            "toUserProfilePk": 111111,
+            "fromUserProfilePk": 137662175,
+            "senderDisplayName": "Benjamin",
+            "mediaType": "Audio",
+            "transcription": "Quel est cet avion ?",
+            "createdTimestamp": "2026-11-06T20:29:19Z",
+        }])
+
+        first_data = client.fetch_all_data()
+        self.assertEqual(first_data["15839246"]["last_message"], "Quel est cet avion ?")
+        self.assertEqual(first_data["15839246"]["connectId"], 137662175)
+        self.assertEqual(first_data["15839246"]["latitude"], 46.7863)
+
+        # Simulate second poll where /v3/family/info fails (503) and fetch_messages/fetch_trackpoints return [] (rate-limited)
+        family_info_ok = False
+        client.fetch_messages = MagicMock(return_value=[])
+        client.fetch_trackpoints = MagicMock(return_value=[])
+
+        second_data = client.fetch_all_data()
+        self.assertEqual(second_data["15839246"]["connectId"], 137662175, "connectId must be preserved when /v3/family/info fails")
+        self.assertEqual(second_data["15839246"]["last_message"], "Quel est cet avion ?", "last_message must not flip to None on rate-limited poll")
+        self.assertEqual(second_data["15839246"]["latitude"], 46.7863, "GPS coordinates must be preserved on rate-limited poll")
+        client.fetch_trackpoints.assert_called_once_with("15839246", limit=200, connect_id=137662175)
+
+        print("  [OK] Cloudflare 429 retry, fallback storm prevention, and state preservation verified!")
+
 
 if __name__ == "__main__":
     unittest.main()
