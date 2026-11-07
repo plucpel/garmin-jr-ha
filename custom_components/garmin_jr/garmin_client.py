@@ -73,6 +73,7 @@ class GarminJrClient:
         self._known_kids: dict[str, dict[str, Any]] = {}
         self._last_results: dict[str, dict[str, Any]] = {}
         self._send_retry_delays: tuple[float, ...] = (1.5, 3.0)
+        self.last_messages_fetch_ok: bool = False
 
         if token_data:
             self._load_token_data(token_data)
@@ -517,6 +518,7 @@ class GarminJrClient:
         """Fetch message history from GCS Messaging API."""
         if time.time() < self._gcs_rate_limited_until:
             _LOGGER.debug("Skipping fetch_messages: GCS rate-limit cooldown active")
+            self.last_messages_fetch_ok = False
             return []
         try:
             headers = self._get_it_headers()
@@ -529,6 +531,7 @@ class GarminJrClient:
             params: dict[str, Any] = {"after": after_iso, "limit": max(limit, 100)}
             resp = self._http_get(url, headers=headers, params=params, timeout=10)
             if resp.status_code == 200:
+                self.last_messages_fetch_ok = True
                 data = resp.json()
                 _LOGGER.debug("GCS fetch_messages raw: %s", data)
                 result_msgs: list[dict[str, Any]] = []
@@ -559,6 +562,7 @@ class GarminJrClient:
                     )
                     return result_msgs
                 return []
+            self.last_messages_fetch_ok = False
             if self._is_rate_limited_response(resp):
                 self._note_gcs_rate_limit("guardian/messages", resp.status_code)
                 return []
@@ -573,6 +577,7 @@ class GarminJrClient:
                 c_url = f"{GCS_API_BASE_URL}/messaging/family/api/v1/conversations"
                 c_resp = self._http_get(c_url, headers=headers, timeout=10)
                 if c_resp.status_code == 200:
+                    self.last_messages_fetch_ok = True
                     c_data = c_resp.json()
                     conv_list = c_data if isinstance(c_data, list) else (c_data.get("conversations") or [])
                     fallback_msgs: list[dict[str, Any]] = []
@@ -596,6 +601,7 @@ class GarminJrClient:
                 _LOGGER.debug("Conversations fallback error: %s", c_err)
 
         except Exception as err:
+            self.last_messages_fetch_ok = False
             _LOGGER.debug("Could not fetch messages from GCS API: %s", err)
         return []
 
