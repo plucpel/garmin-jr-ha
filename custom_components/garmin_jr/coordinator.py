@@ -440,6 +440,14 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
         )
         child_data["last_message_media"] = latest_msg.get("mediaType", "Text")
 
+        # Keep client._last_results in sync so 2-minute coordinator polls never revert fast-polled messages
+        last_results = getattr(self.client, "_last_results", None)
+        if isinstance(last_results, dict) and str(child_id) in last_results:
+            last_results[str(child_id)]["last_message"] = child_data["last_message"]
+            last_results[str(child_id)]["last_message_time"] = child_data["last_message_time"]
+            last_results[str(child_id)]["last_message_sender"] = child_data["last_message_sender"]
+            last_results[str(child_id)]["last_message_media"] = child_data["last_message_media"]
+
         return has_updates, has_pending_transcription, has_new_child_message
 
     async def _async_poll_messages(self, _now: Any = None) -> None:
@@ -515,6 +523,8 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
                 self.client.fetch_messages, None, 100
             )
             if not recent_messages:
+                if getattr(self.client, "last_messages_fetch_ok", True):
+                    self._messages_seeded = True
                 return
 
             has_updates = False
@@ -555,7 +565,7 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
                 if c_new_msg:
                     self._conversation_burst_until = now_ts + 90.0
 
-            if recent_messages:
+            if recent_messages or getattr(self.client, "last_messages_fetch_ok", True):
                 self._messages_seeded = True
 
             if recent_messages and not any_messages_matched:
@@ -666,7 +676,7 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
                         fire_events=self._messages_seeded,
                     )
 
-            if any_new_msgs:
+            if any_new_msgs or getattr(self.client, "last_messages_fetch_ok", True):
                 self._messages_seeded = True
             self._initial_fetch_done = True
             return data
