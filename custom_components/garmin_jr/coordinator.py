@@ -36,7 +36,7 @@ from .const import (
 from .garmin_client import GarminJrAuthError, GarminJrClient, GarminJrConnectionError
 from .plane_spotter import prefetch_airspace_sync
 
-FAST_MESSAGE_POLL_INTERVAL_SECONDS = 10
+FAST_MESSAGE_POLL_INTERVAL_SECONDS = 5
 
 
 def resolve_child_profile_pk(
@@ -242,6 +242,7 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
         self.entry = entry
         self._seen_message_ids: BoundedSet = BoundedSet(maxlen=1000)
         self._initial_fetch_done: bool = False
+        self._messages_seeded: bool = False
         self._unsub_msg_poll: CALLBACK_TYPE | None = None
         self._school_mode_pause_until: float = 0.0
         self._last_night_poll_ts: float = 0.0
@@ -541,7 +542,11 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
 
                 any_messages_matched = True
                 c_updates, c_pending, c_new_msg = self._process_child_messages(
-                    child_id, child_data, child_messages, now_ts, fire_events=True
+                    child_id,
+                    child_data,
+                    child_messages,
+                    now_ts,
+                    fire_events=self._messages_seeded,
                 )
                 if c_updates:
                     has_updates = True
@@ -549,6 +554,9 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
                     has_pending_transcription = True
                 if c_new_msg:
                     self._conversation_burst_until = now_ts + 90.0
+
+            if recent_messages:
+                self._messages_seeded = True
 
             if recent_messages and not any_messages_matched:
                 LOGGER.debug("Garmin Jr: %d message(s) received from cloud, none matched registered children", len(recent_messages))
@@ -645,17 +653,21 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
 
             # Check for new messages and fire events
             now_ts = dt_util.now().timestamp()
+            any_new_msgs = False
             for child_id, child_data in data.items():
                 new_msgs = child_data.get("new_messages", [])
                 if new_msgs:
+                    any_new_msgs = True
                     self._process_child_messages(
                         child_id,
                         child_data,
                         new_msgs,
                         now_ts,
-                        fire_events=self._initial_fetch_done,
+                        fire_events=self._messages_seeded,
                     )
 
+            if any_new_msgs:
+                self._messages_seeded = True
             self._initial_fetch_done = True
             return data
 
