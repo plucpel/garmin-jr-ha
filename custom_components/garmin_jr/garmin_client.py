@@ -78,10 +78,13 @@ class GarminJrClient:
             self._load_token_data(token_data)
 
     def _create_http_session(self) -> Any:
-        """Create a persistent HTTP session with TLS/connection pooling and Cloudflare cookie retention."""
+        """Create a persistent Android-emulated HTTP session with TLS/connection pooling and cookie retention."""
         if HAS_CURL_CFFI and cffi_requests is not None:
             try:
-                return cffi_requests.Session(impersonate="chrome")
+                browser_type = getattr(cffi_requests, "BrowserType", None)
+                for target in ("chrome131_android", "chrome99_android", "chrome"):
+                    if browser_type is None or hasattr(browser_type, target):
+                        return cffi_requests.Session(impersonate=target, default_headers=False)
             except Exception as err:
                 _LOGGER.debug("Could not initialize curl_cffi Session, falling back to requests.Session: %s", err)
         session = requests.Session()
@@ -479,7 +482,6 @@ class GarminJrClient:
                     return data.get("trackPoints") or data.get("points") or []
             elif self._is_rate_limited_response(resp):
                 self._note_gcs_rate_limit("trackpoints", resp.status_code)
-                self._reset_http_session()
             else:
                 _LOGGER.warning("Trackpoints API returned HTTP %s for kid %s (connectId=%s): %s", resp.status_code, kid_profile_id, tracker_id, resp.text[:100])
         except Exception as err:
@@ -559,7 +561,6 @@ class GarminJrClient:
                 return []
             if self._is_rate_limited_response(resp):
                 self._note_gcs_rate_limit("guardian/messages", resp.status_code)
-                self._reset_http_session()
                 return []
             if resp.status_code in (401, 403, 500, 502, 503, 504):
                 _LOGGER.debug("GCS guardian/messages returned HTTP %s (skipping fallback): %s", resp.status_code, resp.text[:100])
@@ -706,7 +707,6 @@ class GarminJrClient:
                 is_rate_limit = self._is_rate_limited_response(resp)
                 if is_rate_limit:
                     self._note_gcs_rate_limit("messages/user/text", resp.status_code)
-                    self._reset_http_session()
 
                 if (is_rate_limit or resp.status_code in (500, 502, 503, 504)) and attempt < len(self._send_retry_delays):
                     delay = self._send_retry_delays[attempt]
@@ -756,7 +756,6 @@ class GarminJrClient:
                 is_rate_limit = self._is_rate_limited_response(resp)
                 if is_rate_limit:
                     self._note_gcs_rate_limit("update-location", resp.status_code)
-                    self._reset_http_session()
 
                 if (is_rate_limit or resp.status_code in (500, 502, 503, 504)) and attempt < len(self._send_retry_delays):
                     delay = self._send_retry_delays[attempt]
