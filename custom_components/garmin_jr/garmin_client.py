@@ -337,7 +337,7 @@ class GarminJrClient:
                 url = f"{SERVICES_BASE_URL}/oauthTokenExchangeService/refreshToken"
                 headers = {
                     "Content-Type": "application/json",
-                    "User-Agent": "GarminJr/2.0.0 (Android)",
+                    "User-Agent": "Vivokid 7.5 245",
                     "X-garmin-client-id": "VIVOFIT_JR_ANDROID",
                 }
                 data = {
@@ -371,7 +371,7 @@ class GarminJrClient:
                 ex_headers = {
                     "Content-Type": "application/x-www-form-urlencoded",
                     "Accept-Encoding": "en_US",
-                    "User-Agent": "GarminJr/2.0.0 (Android)",
+                    "User-Agent": "Vivokid 7.5 245",
                 }
                 ex_res = self._http_post(ex_url, data=ex_data, headers=ex_headers, timeout=15)
                 if ex_res.status_code == 200:
@@ -392,7 +392,7 @@ class GarminJrClient:
         token = self._ensure_diauth_token() or self._extract_di_token() or ""
         return {
             "Authorization": f"Bearer {token}",
-            "User-Agent": "GarminJr/2.0.0 (Android)",
+            "User-Agent": "Vivokid 7.5 245",
             "Accept": "application/json",
         }
 
@@ -402,7 +402,7 @@ class GarminJrClient:
         token = self._it_token or self._ensure_diauth_token() or self._extract_di_token() or ""
         return {
             "Authorization": f"Bearer {token}",
-            "User-Agent": "GarminJr/2.0.0 (Android)",
+            "User-Agent": "Vivokid 7.5 245",
             "Accept": "application/json",
             "X-garmin-client-id": "VIVOFIT_JR_ANDROID",
         }
