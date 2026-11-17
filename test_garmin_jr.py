@@ -359,7 +359,25 @@ class TestGarminJrClient(unittest.TestCase):
         self.assertEqual(record["fix_type"], "Wfps")
         self.assertTrue(record["has_wifi"])
         self.assertEqual(len(record["geofences"]), 2)
-        print("  [OK] Garmin Safe Zone discovery and status change resolution verified!")
+
+        # Test stationary overnight trackpoints without statusChanges (GeofenceEnter aged out):
+        # must still resolve "Home" via coordinate-to-geofence radius matching instead of "Outside"
+        client.fetch_trackpoints = MagicMock(return_value=[
+            {
+                "latitude": 45.5002,
+                "longitude": -73.5601,
+                "accuracy": 20,
+                "timestamp": "2026-08-24T03:15:00Z",
+                "fixType": "WFPS_CACHE_GPS",
+                "familyPointData": {"statusChanges": []},
+            }
+        ])
+        overnight_data = client.fetch_all_data()
+        overnight_record = overnight_data["98765432"]
+        self.assertEqual(overnight_record["garmin_safe_zone"], "Home")
+        self.assertEqual(overnight_record["garmin_geofence_id"], "101")
+        self.assertTrue(overnight_record["has_wifi"])
+        print("  [OK] Garmin Safe Zone discovery, status change, and overnight coordinate fallback verified!")
 
     @patch("custom_components.garmin_jr.garmin_client.requests.post")
     @patch("custom_components.garmin_jr.garmin_client.requests.get")

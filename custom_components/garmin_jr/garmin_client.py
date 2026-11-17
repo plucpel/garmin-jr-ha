@@ -6,6 +6,7 @@ import contextlib
 import datetime
 import json
 import logging
+import math
 import time
 from typing import Any
 import uuid
@@ -39,6 +40,17 @@ class GarminJrAuthError(Exception):
 
 class GarminJrConnectionError(Exception):
     """Exception raised for network or connection failures."""
+
+
+def _haversine_distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Return distance in meters between two WGS84 coordinates."""
+    r = 6371000.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2.0) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2.0) ** 2
+    return 2.0 * r * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
 
 
 class GarminJrClient:
@@ -471,7 +483,7 @@ class GarminJrClient:
             headers = self._get_it_headers()
             url = f"{GCS_API_BASE_URL}/tracker/family/api/v1/trackpoints"
             begin = (
-                datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=12)
+                datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=36)
             ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
             params: dict[str, Any] = {"kidProfileId": tracker_id, "begin": begin, "limit": max(limit, 200)}
             resp = self._http_get(url, headers=headers, params=params, timeout=15)
@@ -1102,6 +1114,49 @@ class GarminJrClient:
                                     break
                             if active_geofence_name is not None:
                                 break
+
+                        if active_geofence_name is None and latitude is not None and longitude is not None and kid_geofences:
+                            # Fallback 1: Match current watch coordinates against configured safe zones
+                            best_gf = None
+                            best_dist = float("inf")
+                            acc_margin = min(float(gps_accuracy or 15), 75.0)
+                            for gf in kid_geofences:
+                                gf_lat = gf.get("latitude")
+                                gf_lon = gf.get("longitude")
+                                if gf_lat is None or gf_lon is None:
+                                    continue
+                                try:
+                                    dist_m = _haversine_distance_m(
+                                        float(latitude), float(longitude), float(gf_lat), float(gf_lon)
+                                    )
+                                    radius_m = float(gf.get("radius") or 150.0)
+                                    if dist_m <= (radius_m + acc_margin) and dist_m < best_dist:
+                                        best_dist = dist_m
+                                        best_gf = gf
+                                except Exception:
+                                    continue
+                            if best_gf is not None:
+                                active_geofence_id = str(best_gf.get("id")) if best_gf.get("id") is not None else None
+                                active_geofence_name = best_gf.get("name") or (
+                                    f"Zone {active_geofence_id}" if active_geofence_id else None
+                                )
+                                has_wifi = bool(best_gf.get("wifi_ssid"))
+                                geofence_lat = best_gf.get("latitude")
+                                geofence_lon = best_gf.get("longitude")
+                                geofence_radius = best_gf.get("radius")
+
+                        if (
+                            active_geofence_name is None
+                            and prev_record.get("garmin_safe_zone")
+                            and prev_record.get("garmin_safe_zone") != "Outside"
+                        ):
+                            # Fallback 2: Preserve previous safe zone when no GeofenceExit occurred
+                            active_geofence_id = prev_record.get("garmin_geofence_id")
+                            active_geofence_name = prev_record.get("garmin_safe_zone")
+                            has_wifi = prev_record.get("has_wifi", False)
+                            geofence_lat = prev_record.get("geofence_latitude")
+                            geofence_lon = prev_record.get("geofence_longitude")
+                            geofence_radius = prev_record.get("geofence_radius")
 
                         if active_geofence_name is None:
                             active_geofence_name = "Outside"
