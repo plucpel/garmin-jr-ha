@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 from collections import deque
 import contextlib
+import copy
 import datetime
 import json
 import logging
@@ -345,6 +346,15 @@ class GarminJrClient:
                 self._http_session = self._create_http_session()
             return self._http_session.post(url, **kwargs)
 
+    def _http_put(self, url: str, **kwargs: Any) -> Any:
+        """Perform an HTTP PUT using the persistent session (or requests.put if mocked in tests)."""
+        if hasattr(requests.put, "_mock_name") or hasattr(requests.put, "side_effect"):
+            return requests.put(url, **kwargs)
+        with self._lock:
+            if self._http_session is None:
+                self._http_session = self._create_http_session()
+            return self._http_session.put(url, **kwargs)
+
     def is_recently_sent_text(self, text: str | None, window_seconds: float = 45.0) -> bool:
         """Return True if exact text was recently sent by this client to avoid self-reply loops."""
         clean = (text or "").strip()
@@ -573,6 +583,112 @@ class GarminJrClient:
             _LOGGER.debug("Exception fetching kid device settings for %s: %s", device_id, err)
 
         return {}
+
+    def set_kid_school_mode(
+        self,
+        kid_connect_id: str | int,
+        device_id: str | int,
+        enabled: bool,
+        active_mode: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Update child's SchoolMode on the physical watch via Garmin connectapi PUT."""
+        settings = self.fetch_kid_device_settings(kid_connect_id, device_id)
+        if not isinstance(settings, dict) or not settings:
+            _LOGGER.warning("Garmin Jr: Cannot update watch School Mode on device %s; settings unavailable", device_id)
+            return None
+
+        payload = copy.deepcopy(settings)
+        # Garmin DeviceDataManager fills a single space if nickname is empty before saving
+        if not payload.get("nickname"):
+            payload["nickname"] = " "
+
+        sm = payload.get("schoolMode")
+        if not isinstance(sm, dict):
+            sm = {
+                "startTime": 28800,
+                "endTime": 54000,
+                "days": ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"],
+            }
+            payload["schoolMode"] = sm
+
+        cur_mode = str(sm.get("mode") or "")
+        use_title = cur_mode in ("All", "Restricted", "Off")
+
+        if not enabled:
+            if cur_mode.upper() == "OFF":
+                return dict(sm)
+            sm["mode"] = "Off" if use_title else "OFF"
+        else:
+            cand_raw = (active_mode or "").strip()
+            if cand_raw.upper() in ("ALL", "RESTRICTED"):
+                candidate = cand_raw
+            elif cur_mode.upper() in ("ALL", "RESTRICTED"):
+                candidate = cur_mode
+            else:
+                candidate = "ALL"
+            sm["mode"] = candidate.capitalize() if use_title else candidate.upper()
+
+        kid_token = self._get_kid_diauth_token(kid_connect_id)
+        if not kid_token:
+            return None
+
+        url = f"https://connectapi.garmin.com/device-service/deviceservice/device-info/settings/{device_id}"
+        try:
+            headers = {
+                "Authorization": f"Bearer {kid_token}",
+                "User-Agent": "Vivokid 7.5 245",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            }
+            resp = self._http_put(url, headers=headers, json=payload, timeout=15)
+            if resp.status_code == 401:
+                with self._lock:
+                    self._kid_diauth_tokens.pop(str(kid_connect_id), None)
+                kid_token = self._get_kid_diauth_token(kid_connect_id)
+                if kid_token:
+                    headers["Authorization"] = f"Bearer {kid_token}"
+                    resp = self._http_put(url, headers=headers, json=payload, timeout=15)
+
+            if resp.status_code in (200, 204):
+                updated: dict[str, Any] = payload
+                resp_text = getattr(resp, "text", "") or ""
+                if resp.status_code == 200 and resp_text.strip():
+                    try:
+                        parsed = resp.json()
+                        if isinstance(parsed, dict):
+                            updated = parsed
+                    except Exception:
+                        pass
+
+                updated_sm = (updated.get("schoolMode") if isinstance(updated, dict) else None) or sm
+                if not isinstance(updated_sm, dict):
+                    updated_sm = sm
+
+                dev_str = str(device_id)
+                with self._lock:
+                    for cache in (self._known_kids, self._last_results):
+                        for entry in cache.values():
+                            entry_dev = entry.get("device_id") or entry.get("deviceId")
+                            if entry_dev is not None and str(entry_dev) == dev_str:
+                                entry["settings"] = updated
+                                entry["school_mode"] = dict(updated_sm)
+
+                _LOGGER.info(
+                    "Garmin Jr: Updated watch School Mode on device %s -> %s",
+                    device_id,
+                    updated_sm.get("mode"),
+                )
+                return dict(updated_sm)
+
+            _LOGGER.warning(
+                "Garmin Jr: Failed to update watch School Mode on device %s (HTTP %s)",
+                device_id,
+                getattr(resp, "status_code", "unknown"),
+            )
+        except Exception as err:
+            _LOGGER.warning("Garmin Jr: Exception updating watch School Mode on device %s: %s", device_id, err)
+
+        return None
 
     def _ensure_it_token(self) -> None:
         """Ensure a valid IT token exists, exchanging via connectToIT or refreshing."""

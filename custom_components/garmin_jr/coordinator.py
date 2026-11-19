@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import logging
 import time
 from typing import Any
+import unicodedata
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant
@@ -24,10 +25,12 @@ from .const import (
     CONF_SCHOOL_MODE_ENABLED,
     CONF_SCHOOL_MODE_END_TIME,
     CONF_SCHOOL_MODE_START_TIME,
+    CONF_SCHOOL_SAFE_ZONE,
     CONF_TOKEN_DATA,
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_SCHOOL_MODE_END_TIME,
     DEFAULT_SCHOOL_MODE_START_TIME,
+    DEFAULT_SCHOOL_SAFE_ZONE,
     DOMAIN,
     EVENT_MESSAGE_RECEIVED,
     LOGGER,
@@ -112,6 +115,52 @@ def format_time_str(time_val: Any) -> str:
         m = int((time_val % 3600) // 60)
         return f"{h:02d}:{m:02d}"
     return str(time_val or "")
+
+
+def _fold_text_simple(val: str | None) -> str:
+    """Normalize Unicode text to ASCII lowercase for accent-insensitive comparisons."""
+    raw = str(val or "").strip()
+    if not raw:
+        return ""
+    norm = unicodedata.normalize("NFKD", raw)
+    return "".join(ch for ch in norm if not unicodedata.combining(ch)).lower()
+
+
+def is_child_in_school_zone(
+    child_data: dict[str, Any],
+    options: dict[str, Any] | None = None,
+) -> bool:
+    """Return True if child's current Safe Zone matches the configured School Safe Zone."""
+    target = (options or {}).get(CONF_SCHOOL_SAFE_ZONE) or DEFAULT_SCHOOL_SAFE_ZONE
+    zone = child_data.get("garmin_safe_zone") or child_data.get("active_geofence_name") or ""
+    return bool(zone) and _fold_text_simple(str(zone)) == _fold_text_simple(str(target))
+
+
+def _compute_school_mode_restore_dt(
+    child_data: dict[str, Any],
+    current_dt: datetime,
+    options: dict[str, Any] | None = None,
+) -> datetime:
+    """Compute the end-of-school-day timestamp (+1 minute) when School Mode auto-restores."""
+    settings = child_data.get("settings") or {}
+    school_mode = child_data.get("school_mode") or settings.get("schoolMode") or settings.get("school_mode") or {}
+    opt_end = options.get(CONF_SCHOOL_MODE_END_TIME) if options else None
+    end_raw = school_mode.get("endTime") or school_mode.get("end_time") or opt_end or DEFAULT_SCHOOL_MODE_END_TIME
+
+    end_h, end_m = 15, 0
+    try:
+        if isinstance(end_raw, (int, float)):
+            end_h = int(end_raw // 3600) % 24
+            end_m = int((end_raw % 3600) // 60)
+        else:
+            end_h, end_m = map(int, str(end_raw).split(":")[:2])
+    except Exception:
+        pass
+
+    today_end = current_dt.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
+    if current_dt < today_end:
+        return today_end + timedelta(minutes=1)
+    return today_end + timedelta(days=1, minutes=1)
 
 
 def get_child_school_mode_end_time(
@@ -253,7 +302,10 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
         self._last_night_poll_ts: float = 0.0
         self._last_unmatched_log_ts: float = 0.0
         self._school_mode_overrides: dict[str, bool] = {}
+        self._school_mode_saved_modes: dict[str, str] = {}
+        self._school_mode_day_off_restore_at: dict[str, datetime] = {}
         self._was_in_school_mode: bool = False
+        self._was_school_zone_bypassed: bool = False
         self._rapid_retry_unsub: CALLBACK_TYPE | None = None
         self._conversation_burst_until: float = 0.0
         self._burst_poll_unsub: CALLBACK_TYPE | None = None
@@ -302,6 +354,148 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
         self._school_mode_pause_until = 0.0
         self._was_in_school_mode = False
         LOGGER.debug("Garmin Jr: School Mode polling pause reset")
+
+    async def async_sync_child_school_mode(
+        self,
+        child_id: str,
+        enabled: bool,
+        auto_restore: bool = True,
+        restore_at: datetime | None = None,
+    ) -> bool:
+        """Sync School Mode on both Home Assistant coordinator and the physical Bounce watch."""
+        child_id = str(child_id)
+        child_data = self.data.get(child_id, {}) if isinstance(self.data, dict) else {}
+
+        cur_mode = str((child_data.get("school_mode") or {}).get("mode") or "")
+        if cur_mode.upper() in ("ALL", "RESTRICTED"):
+            self._school_mode_saved_modes[child_id] = cur_mode
+
+        self.set_child_school_mode_override(child_id, enabled)
+
+        if not enabled and auto_restore:
+            entry_opts = getattr(self.entry, "options", None) if hasattr(self, "entry") else None
+            target_restore = restore_at or _compute_school_mode_restore_dt(
+                child_data,
+                dt_util.now(),
+                entry_opts,
+            )
+            self._school_mode_day_off_restore_at[child_id] = target_restore
+            if isinstance(child_data, dict) and child_data:
+                child_data["school_mode_restore_at"] = target_restore.isoformat()
+        elif enabled:
+            self._school_mode_day_off_restore_at.pop(child_id, None)
+            self._school_mode_overrides.pop(child_id, None)
+            if isinstance(child_data, dict):
+                child_data.pop("school_mode_restore_at", None)
+                child_data.pop("school_mode_override", None)
+
+        connect_id = (
+            child_data.get("connect_id")
+            or child_data.get("connectId")
+            or (child_data.get("account") or {}).get("connectId")
+        )
+        device_id = child_data.get("device_id") or child_data.get("deviceId")
+
+        if connect_id and device_id and hasattr(self.client, "set_kid_school_mode"):
+            saved_mode = self._school_mode_saved_modes.get(child_id, "ALL")
+            updated_sm = await self.hass.async_add_executor_job(
+                self.client.set_kid_school_mode,
+                connect_id,
+                device_id,
+                enabled,
+                saved_mode,
+            )
+            if isinstance(updated_sm, dict) and isinstance(child_data, dict):
+                sm_copy = dict(updated_sm)
+                sm_copy["enabled"] = bool(enabled)
+                child_data["school_mode"] = sm_copy
+
+        if hasattr(self, "async_update_listeners"):
+            self.async_update_listeners()
+        return True
+
+    def _check_school_mode_auto_restore(self, local_now: datetime) -> None:
+        """Auto-restore School Mode once a temporary day-off window expires."""
+        for child_id, restore_dt in list(self._school_mode_day_off_restore_at.items()):
+            cmp_now = local_now
+            cmp_restore = restore_dt
+            if cmp_now.tzinfo is not None and cmp_restore.tzinfo is None:
+                cmp_restore = cmp_restore.replace(tzinfo=cmp_now.tzinfo)
+            elif cmp_now.tzinfo is None and cmp_restore.tzinfo is not None:
+                cmp_now = cmp_now.replace(tzinfo=cmp_restore.tzinfo)
+            if cmp_now >= cmp_restore:
+                self._school_mode_day_off_restore_at.pop(child_id, None)
+                LOGGER.info(
+                    "Garmin Jr: Auto-restoring School Mode for child %s after day-off window",
+                    child_id,
+                )
+                self._track_background_task(
+                    self.async_sync_child_school_mode(child_id, True, auto_restore=False)
+                )
+
+    def _match_messages_for_child(
+        self,
+        child_id: str,
+        child_data: dict[str, Any],
+        recent_messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Filter raw cloud messages belonging to a single child."""
+        connect_id = (
+            child_data.get("connect_id")
+            or child_data.get("connectId")
+            or (child_data.get("account") or {}).get("connectId")
+        )
+        entry_opts = getattr(self.entry, "options", {}) if hasattr(self, "entry") else {}
+        user_profile_pk = resolve_child_profile_pk(
+            child_id,
+            child_data,
+            options=entry_opts,
+            learned_pks=self.client._learned_child_pks,
+        )
+        return self.client.parse_child_messages(
+            recent_messages,
+            kid_id=child_id,
+            connect_id=connect_id,
+            device_id=child_data.get("device_id") or child_data.get("deviceId"),
+            user_profile_pk=user_profile_pk,
+            total_family_kids=getattr(self.client, "family_kids_count", len(self.data or {})) or len(self.data or {}),
+        )
+
+    async def async_refresh_messages_now(self) -> None:
+        """Perform an immediate lightweight message-only poll (e.g. after send_message)."""
+        if not self.data or self._is_polling_messages:
+            return
+        self._is_polling_messages = True
+        try:
+            after_iso: str | None = None
+            if hasattr(dt_util, "utcnow"):
+                after_iso = (dt_util.utcnow() - timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            recent_messages = await self.hass.async_add_executor_job(
+                self.client.fetch_messages, after_iso, 50
+            )
+            if not recent_messages:
+                return
+            now_ts = time.time()
+            has_updates = False
+            for child_id, child_data in list(self.data.items()):
+                child_messages = self._match_messages_for_child(child_id, child_data, recent_messages)
+                if not child_messages:
+                    continue
+                c_updates, _, _ = self._process_child_messages(
+                    child_id,
+                    child_data,
+                    child_messages,
+                    now_ts,
+                    fire_events=False,
+                )
+                if c_updates:
+                    has_updates = True
+            if has_updates and hasattr(self, "async_update_listeners"):
+                self.async_update_listeners()
+        except Exception as err:
+            LOGGER.debug("Garmin Jr: Immediate message refresh failed: %s", err)
+        finally:
+            self._is_polling_messages = False
 
     def async_start_message_polling(self) -> None:
         """Start the fast background message polling loop."""
@@ -490,23 +684,28 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
 
         now_ts = time.time()
         local_now = dt_util.now()
+        self._check_school_mode_auto_restore(local_now)
 
-        # 1. Check if any child is currently in an active School Mode window derived from the watch/config
+        # 1. Check if any child is currently in an active School Mode window AND in School Safe Zone
         max_school_end_dt: datetime | None = None
+        any_school_schedule_window = False
         is_night_mode = False
-        night_mode_enabled = bool(
-            getattr(self.entry, "options", {}).get(CONF_NIGHT_MODE_ENABLED, False)
-        ) if hasattr(self, "entry") else False
+        entry_opts = getattr(self.entry, "options", {}) if hasattr(self, "entry") else {}
+        night_mode_enabled = bool(entry_opts.get(CONF_NIGHT_MODE_ENABLED, False))
 
         for child_id, child_data in self.data.items():
-            school_end = get_child_school_mode_end_time(child_data, local_now, getattr(self.entry, "options", {}))
+            school_end = get_child_school_mode_end_time(child_data, local_now, entry_opts)
             if school_end:
-                if max_school_end_dt is None or school_end > max_school_end_dt:
-                    max_school_end_dt = school_end
+                any_school_schedule_window = True
+                has_zone = bool(child_data.get("garmin_safe_zone") or child_data.get("active_geofence_name"))
+                if not has_zone or is_child_in_school_zone(child_data, entry_opts):
+                    if max_school_end_dt is None or school_end > max_school_end_dt:
+                        max_school_end_dt = school_end
             elif night_mode_enabled and get_child_operating_mode(child_data, local_now) == "sleep_time":
                 is_night_mode = True
 
         if max_school_end_dt and max_school_end_dt > local_now:
+            self._was_school_zone_bypassed = False
             pause_seconds = (max_school_end_dt - local_now).total_seconds() + 5  # 5s safety margin
             self._school_mode_pause_until = now_ts + pause_seconds
             if not self._was_in_school_mode:
@@ -517,6 +716,15 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
                     int(pause_seconds),
                 )
             return
+
+        if any_school_schedule_window:
+            if not self._was_school_zone_bypassed:
+                self._was_school_zone_bypassed = True
+                LOGGER.info(
+                    "Garmin Jr: School Mode window active, but child is not in School Safe Zone; keeping fast message polling active"
+                )
+        else:
+            self._was_school_zone_bypassed = False
 
         if self._was_in_school_mode or self._school_mode_pause_until > 0.0:
             self._was_in_school_mode = False
@@ -563,21 +771,7 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
             any_messages_matched = False
 
             for child_id, child_data in list(self.data.items()):
-                connect_id = child_data.get("connect_id") or child_data.get("connectId") or (child_data.get("account") or {}).get("connectId")
-                user_profile_pk = resolve_child_profile_pk(
-                    child_id,
-                    child_data,
-                    options=self.entry.options,
-                    learned_pks=self.client._learned_child_pks,
-                )
-                child_messages = self.client.parse_child_messages(
-                    recent_messages,
-                    kid_id=child_id,
-                    connect_id=connect_id,
-                    device_id=child_data.get("device_id") or child_data.get("deviceId"),
-                    user_profile_pk=user_profile_pk,
-                    total_family_kids=getattr(self.client, "family_kids_count", len(self.data)) or len(self.data),
-                )
+                child_messages = self._match_messages_for_child(child_id, child_data, recent_messages)
                 if not child_messages:
                     continue
 
@@ -664,6 +858,16 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
             local_today = dt_util.now().date().isoformat()
             data = await self.hass.async_add_executor_job(self.client.fetch_all_data, local_today)
 
+            # Record active watch modes and check day-off auto-restore timer
+            local_now = dt_util.now()
+            for cid, c_data in data.items():
+                sm_mode = str((c_data.get("school_mode") or {}).get("mode") or "")
+                if sm_mode.upper() in ("ALL", "RESTRICTED"):
+                    self._school_mode_saved_modes[cid] = sm_mode
+                if cid in self._school_mode_day_off_restore_at:
+                    c_data["school_mode_restore_at"] = self._school_mode_day_off_restore_at[cid].isoformat()
+            self._check_school_mode_auto_restore(local_now)
+
             # Apply any active manual overrides (e.g. for holiday/vacation)
             for cid, override in self._school_mode_overrides.items():
                 if cid in data:
@@ -676,9 +880,13 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
                             data[cid]["school_mode"]["mode"] = "Restricted"
                             data[cid]["school_mode"]["enabled"] = True
 
-            # If fresh data shows school mode is not active, reset school mode pause
+            # If fresh data shows school mode is not active (or not in School Safe Zone), reset pause
             any_in_school = any(
-                get_child_school_mode_end_time(c_data, dt_util.now(), self.entry.options) is not None
+                get_child_school_mode_end_time(c_data, local_now, self.entry.options) is not None
+                and (
+                    not (c_data.get("garmin_safe_zone") or c_data.get("active_geofence_name"))
+                    or is_child_in_school_zone(c_data, self.entry.options)
+                )
                 for c_data in data.values()
             )
             if not any_in_school and (self._school_mode_pause_until > 0.0 or self._was_in_school_mode):

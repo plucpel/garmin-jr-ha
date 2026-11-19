@@ -31,6 +31,7 @@ from .const import (
     CONF_SCHOOL_MODE_ENABLED,
     CONF_SCHOOL_MODE_END_TIME,
     CONF_SCHOOL_MODE_START_TIME,
+    CONF_SCHOOL_SAFE_ZONE,
     CONF_TOKEN_DATA,
     CONF_TOKENS,
     CONF_ZONE_MAPPING,
@@ -41,6 +42,7 @@ from .const import (
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_SCHOOL_MODE_END_TIME,
     DEFAULT_SCHOOL_MODE_START_TIME,
+    DEFAULT_SCHOOL_SAFE_ZONE,
     DOMAIN,
 )
 from .garmin_client import GarminJrAuthError, GarminJrClient, GarminJrConnectionError
@@ -346,6 +348,7 @@ class GarminJrOptionsFlowHandler(config_entries.OptionsFlow):
                     CONF_LLM_MODEL,
                     CONF_GARAGE_COVER_ENTITY,
                     CONF_HOME_SAFE_ZONE,
+                    CONF_SCHOOL_SAFE_ZONE,
                     CONF_CLEAR_LEARNED_PKS,
                 ) or key.startswith("profile_pk_"):
                     continue
@@ -365,6 +368,7 @@ class GarminJrOptionsFlowHandler(config_entries.OptionsFlow):
 
             existing_cover = self.config_entry.options.get(CONF_GARAGE_COVER_ENTITY, DEFAULT_GARAGE_COVER_ENTITY)
             existing_zone = self.config_entry.options.get(CONF_HOME_SAFE_ZONE, DEFAULT_HOME_SAFE_ZONE)
+            existing_school_zone = self.config_entry.options.get(CONF_SCHOOL_SAFE_ZONE, DEFAULT_SCHOOL_SAFE_ZONE)
 
             # Start with existing options to ensure nothing is wiped
             entry_data = dict(self.config_entry.options)
@@ -380,6 +384,7 @@ class GarminJrOptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_LLM_MODEL: str(user_input.get(CONF_LLM_MODEL, DEFAULT_LLM_MODEL)).strip(),
                 CONF_GARAGE_COVER_ENTITY: str(user_input.get(CONF_GARAGE_COVER_ENTITY, existing_cover)).strip() or DEFAULT_GARAGE_COVER_ENTITY,
                 CONF_HOME_SAFE_ZONE: str(user_input.get(CONF_HOME_SAFE_ZONE, existing_zone)).strip() or DEFAULT_HOME_SAFE_ZONE,
+                CONF_SCHOOL_SAFE_ZONE: str(user_input.get(CONF_SCHOOL_SAFE_ZONE, existing_school_zone)).strip() or DEFAULT_SCHOOL_SAFE_ZONE,
             })
 
             if user_input.get(CONF_CLEAR_LEARNED_PKS):
@@ -437,6 +442,10 @@ class GarminJrOptionsFlowHandler(config_entries.OptionsFlow):
         current_home_zone = str(self.config_entry.options.get(
             CONF_HOME_SAFE_ZONE,
             DEFAULT_HOME_SAFE_ZONE,
+        ))
+        current_school_zone = str(self.config_entry.options.get(
+            CONF_SCHOOL_SAFE_ZONE,
+            DEFAULT_SCHOOL_SAFE_ZONE,
         ))
 
         # 2. Fetch available Home Assistant zones
@@ -506,6 +515,12 @@ class GarminJrOptionsFlowHandler(config_entries.OptionsFlow):
             vol.Optional(
                 CONF_HOME_SAFE_ZONE,
                 default=current_home_zone,
+            ): selector.TextSelector(
+                selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
+            ),
+            vol.Optional(
+                CONF_SCHOOL_SAFE_ZONE,
+                default=current_school_zone,
             ): selector.TextSelector(
                 selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
             ),

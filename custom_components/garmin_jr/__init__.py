@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import contextlib
+import inspect
 import logging
+import re
 from typing import Any
 
 import voluptuous as vol
@@ -47,6 +49,7 @@ from .const import (
 )
 from .coordinator import (
     GarminJrDataUpdateCoordinator,
+    _fold_text_simple,
     resolve_child_profile_pk,
 )
 from .garmin_client import GarminJrClient
@@ -59,6 +62,11 @@ from .plane_spotter import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+_NO_SCHOOL_MSG_RE = re.compile(
+    r"\b(pedagog\w*|conge\b|ecole\s+fermee|tempete\b|journee\s+blanche|relache\b|greve\b)",
+    re.IGNORECASE,
+)
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
@@ -158,6 +166,23 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         if not success:
             raise HomeAssistantError(f"Failed to send Garmin Jr message to profile {target_pk}")
         _LOGGER.debug("Sent Garmin Jr message to %s", target_pk)
+
+        refresh_fn = getattr(coordinator, "async_refresh_messages_now", None)
+        if callable(refresh_fn):
+            res = refresh_fn()
+            if inspect.isawaitable(res):
+                await res
+
+        if kid_id and _NO_SCHOOL_MSG_RE.search(_fold_text_simple(message)):
+            _LOGGER.info(
+                "Garmin Jr: No-school keyword in outbound message for %s; unlocking School Mode for the day",
+                kid_id,
+            )
+            sync_fn = getattr(coordinator, "async_sync_child_school_mode", None)
+            if callable(sync_fn):
+                res2 = sync_fn(kid_id, False)
+                if inspect.isawaitable(res2):
+                    await res2
 
     async def async_handle_request_location_update(call: Any) -> None:
         """Handle request_location_update service call."""

@@ -26,6 +26,7 @@ CONF_LLM_URL = "llm_url"
 CONF_LLM_MODEL = "llm_model"
 CONF_GARAGE_COVER_ENTITY = "garage_cover_entity"
 CONF_HOME_SAFE_ZONE = "home_safe_zone"
+CONF_SCHOOL_SAFE_ZONE = "school_safe_zone"
 CONF_CLEAR_LEARNED_PKS = "clear_learned_pks"
 
 DEFAULT_SCAN_INTERVAL = 300  # 5 minutes
@@ -35,6 +36,7 @@ DEFAULT_LLM_URL = "http://127.0.0.1:13305"
 DEFAULT_LLM_MODEL = "gemma4-it-e2b-FLM"
 DEFAULT_GARAGE_COVER_ENTITY = "cover.garage_door"
 DEFAULT_HOME_SAFE_ZONE = "Papa"
+DEFAULT_SCHOOL_SAFE_ZONE = "École"
 
 PLATFORMS = ["device_tracker", "sensor", "switch"]
 

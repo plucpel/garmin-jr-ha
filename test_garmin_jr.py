@@ -1819,6 +1819,204 @@ class TestGarminJrClient(unittest.TestCase):
         self.assertNotIn(CONF_CLEAR_LEARNED_PKS, saved_opts)
         print("  [OK] H3/H5/H7 and M2/M3/M4/M10 regressions verified!")
 
+    @patch("custom_components.garmin_jr.garmin_client.requests.put")
+    @patch("custom_components.garmin_jr.garmin_client.requests.get")
+    def test_v1524_watch_school_mode_sync_presence_bypass_and_pedago_trigger(self, mock_get, mock_put):
+        """Test physical watch SchoolMode PUT sync, Safe Zone bypass, send_message pedago trigger, and auto-restore."""
+        import asyncio
+        import datetime as dt_mod
+        import time
+        from custom_components.garmin_jr import async_setup
+        from custom_components.garmin_jr.const import ATTR_MESSAGE, ATTR_TARGET, DOMAIN, SERVICE_SEND_MESSAGE
+        from custom_components.garmin_jr.coordinator import GarminJrDataUpdateCoordinator
+        from custom_components.garmin_jr.switch import GarminJrSchoolModeSwitch
+
+        class MockResp:
+            def __init__(self, status_code, json_data=None, text=""):
+                self.status_code = status_code
+                self._json = json_data or {}
+                self.text = text or (json.dumps(json_data) if json_data is not None else "")
+
+            def json(self):
+                return self._json
+
+        # 1. Test set_kid_school_mode GET -> PUT with 401 retry & blank nickname padding
+        client = GarminJrClient(token_data={"di_token": "mock", "it_token": "mock_it"})
+        client.client.di_token = "mock"
+        client._get_kid_diauth_token = MagicMock(
+            side_effect=["tok_old", "tok_old", "tok_new", "tok_new", "tok_new", "tok_new"]
+        )
+
+        current_settings = {
+            "deviceId": 30000001,
+            "nickname": "",
+            "alarms": [{"alarmId": 42}],
+            "schoolMode": {
+                "mode": "All",
+                "startTime": 28920,
+                "endTime": 54360,
+                "days": ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"],
+            },
+        }
+        updated_off = dict(current_settings)
+        updated_off["nickname"] = " "
+        updated_off["schoolMode"] = dict(current_settings["schoolMode"], mode="Off")
+
+        mock_get.side_effect = [
+            MockResp(200, current_settings),
+            MockResp(200, updated_off),
+            MockResp(200, updated_off),
+        ]
+        put_payloads = []
+
+        def _fake_put(url, headers=None, json=None, timeout=15):
+            put_payloads.append((headers.get("Authorization"), json))
+            if len(put_payloads) == 1:
+                return MockResp(401, text="Unauthorized")
+            return MockResp(200, updated_off if len(put_payloads) == 2 else {**updated_off, "schoolMode": {**updated_off["schoolMode"], "mode": "All"}})
+
+        mock_put.side_effect = _fake_put
+
+        res_off = client.set_kid_school_mode(20000001, 30000001, enabled=False)
+        self.assertEqual(res_off["mode"], "Off")
+        self.assertEqual(len(put_payloads), 2, "Expected 401 retry on PUT")
+        self.assertEqual(put_payloads[1][0], "Bearer tok_new")
+        self.assertEqual(put_payloads[1][1]["nickname"], " ")
+        self.assertEqual(put_payloads[1][1]["alarms"], [{"alarmId": 42}])
+        self.assertEqual(put_payloads[1][1]["schoolMode"]["mode"], "Off")
+
+        # Already Off -> skips redundant PUT
+        res_skip = client.set_kid_school_mode(20000001, 30000001, enabled=False)
+        self.assertEqual(res_skip["mode"], "Off")
+        self.assertEqual(len(put_payloads), 2)
+
+        # Re-enable -> PUTs "All"
+        res_on = client.set_kid_school_mode(20000001, 30000001, enabled=True, active_mode="All")
+        self.assertEqual(res_on["mode"], "All")
+        self.assertEqual(len(put_payloads), 3)
+        self.assertEqual(put_payloads[2][1]["schoolMode"]["mode"], "All")
+
+        # 2. Test Presence Bypass in coordinator._async_poll_messages
+        mock_hass = MagicMock()
+        created_tasks = []
+
+        def _capture_task(coro):
+            t = asyncio.ensure_future(coro)
+            created_tasks.append(t)
+            return t
+
+        mock_hass.async_create_task = MagicMock(side_effect=_capture_task)
+        mock_hass.async_add_executor_job = AsyncMock(side_effect=lambda fn, *a: fn(*a))
+
+        mock_entry = MagicMock()
+        mock_entry.entry_id = "e_v1524"
+        mock_entry.data = {}
+        mock_entry.options = {}
+
+        fake_client = MagicMock()
+        fake_client._learned_child_pks = {}
+        fake_client._guardian_profile_pks = set()
+        fake_client.family_kids_count = 1
+        fake_client._gcs_rate_limited_until = 0.0
+        fake_client.last_messages_fetch_ok = True
+        fake_client.fetch_messages = MagicMock(return_value=[])
+        fake_client.send_text_message = MagicMock(return_value=True)
+        fake_client.set_kid_school_mode = MagicMock(
+            side_effect=lambda cid, did, enabled, active_mode="All": {
+                "mode": "All" if enabled else "Off",
+                "startTime": 28920,
+                "endTime": 54360,
+                "days": ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"],
+            }
+        )
+
+        coord = GarminJrDataUpdateCoordinator(mock_hass, mock_entry, fake_client)
+        coord._initial_fetch_done = True
+        coord._messages_seeded = True
+        coord.data = {
+            "10000001": {
+                "child_id": "10000001",
+                "child_name": "Leo",
+                "connect_id": 20000001,
+                "device_id": 30000001,
+                "garmin_safe_zone": "Ecole",  # Accent-insensitive match to default "École"
+                "school_mode": {
+                    "mode": "All",
+                    "startTime": 28920,
+                    "endTime": 54360,
+                    "days": ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"],
+                },
+            }
+        }
+
+        thu_lunch = dt_mod.datetime(2026, 11, 19, 12, 43, 0, tzinfo=dt_mod.timezone.utc)
+        with patch("custom_components.garmin_jr.coordinator.dt_util.now", return_value=thu_lunch):
+            asyncio.run(coord._async_poll_messages())
+        fake_client.fetch_messages.assert_not_called()
+
+        # Away from School Safe Zone ("Maison") -> fast polling stays active without touching watch settings
+        coord.data["10000001"]["garmin_safe_zone"] = "Maison"
+        coord._school_mode_pause_until = 0.0
+        coord._was_in_school_mode = False
+        with patch("custom_components.garmin_jr.coordinator.dt_util.now", return_value=thu_lunch):
+            asyncio.run(coord._async_poll_messages())
+        fake_client.fetch_messages.assert_called_once()
+        fake_client.set_kid_school_mode.assert_not_called()
+
+        # 3. Test send_message pedago trigger -> immediate refresh + watch unlock + 15:07 auto-restore
+        coord.data["10000001"]["garmin_safe_zone"] = "Ecole"
+        fake_client.fetch_messages.reset_mock()
+        fake_client.fetch_messages.return_value = [
+            {
+                "messageId": "m-ped-1",
+                "fromUserProfilePk": 999000,
+                "messageText": "🎉 Journée pédagogique",
+                "mediaType": "text/plain",
+                "createdTimestamp": "2026-11-19T13:00:00Z",
+            }
+        ]
+        fake_client._guardian_profile_pks = {"999000"}
+        fake_client.parse_child_messages = lambda msgs, **kw: msgs
+
+        registered_services = {}
+        mock_hass.services.async_register = MagicMock(
+            side_effect=lambda dom, srv, handler, schema=None, supports_response=None: registered_services.__setitem__(srv, handler)
+        )
+        mock_hass.data = {}
+        asyncio.run(async_setup(mock_hass, {}))
+        mock_hass.data[DOMAIN][mock_entry.entry_id] = coord
+
+        switch = GarminJrSchoolModeSwitch(coord, "10000001")
+        self.assertTrue(switch.is_on)
+
+        send_call = MagicMock()
+        send_call.data = {ATTR_TARGET: "Leo", ATTR_MESSAGE: "🎉 Journée pédagogique"}
+
+        async def _run_send_and_restore():
+            with patch("custom_components.garmin_jr.coordinator.dt_util.now", return_value=thu_lunch):
+                await registered_services[SERVICE_SEND_MESSAGE](send_call)
+
+            self.assertEqual(coord.data["10000001"]["last_message"], "🎉 Journée pédagogique")
+            fake_client.set_kid_school_mode.assert_called_once_with(20000001, 30000001, False, "All")
+            self.assertFalse(switch.is_on)
+            attrs_off = switch.extra_state_attributes
+            self.assertTrue(attrs_off["holiday_override"])
+            self.assertEqual(attrs_off["restore_at"], "2026-11-19T15:07:00+00:00")
+
+            # Advance clock past 15:07:00 -> auto-restore switches watch & switch back ON
+            thu_after = dt_mod.datetime(2026, 11, 19, 15, 8, 0, tzinfo=dt_mod.timezone.utc)
+            coord._check_school_mode_auto_restore(thu_after)
+            self.assertEqual(len(created_tasks), 1)
+            await created_tasks[0]
+
+        asyncio.run(_run_send_and_restore())
+        fake_client.set_kid_school_mode.assert_called_with(20000001, 30000001, True, "All")
+        self.assertTrue(switch.is_on)
+        attrs_restored = switch.extra_state_attributes
+        self.assertFalse(attrs_restored["holiday_override"])
+        self.assertIsNone(attrs_restored["restore_at"])
+        print("  [OK] v1.5.24 watch SchoolMode PUT sync, Safe Zone bypass, pedago trigger, and auto-restore verified!")
+
 
 if __name__ == "__main__":
     unittest.main()

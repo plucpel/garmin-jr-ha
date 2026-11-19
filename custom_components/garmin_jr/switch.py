@@ -1,6 +1,7 @@
 """Switch platform for Garmin Jr."""
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Any
 
@@ -11,6 +12,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from .const import (
     ATTR_CHILD_ID,
@@ -88,8 +90,26 @@ class GarminJrSchoolModeSwitch(
         if last_state is None:
             return
         if last_state.state == "off":
+            restore_raw = last_state.attributes.get("restore_at")
+            restore_dt = dt_util.parse_datetime(str(restore_raw)) if restore_raw and hasattr(dt_util, "parse_datetime") else None
+            if restore_dt is not None:
+                now_dt = dt_util.now()
+                cmp_now = now_dt
+                cmp_restore = restore_dt
+                if cmp_now.tzinfo is not None and cmp_restore.tzinfo is None:
+                    cmp_restore = cmp_restore.replace(tzinfo=cmp_now.tzinfo)
+                elif cmp_now.tzinfo is None and cmp_restore.tzinfo is not None:
+                    cmp_now = cmp_now.replace(tzinfo=cmp_restore.tzinfo)
+                if cmp_restore <= cmp_now:
+                    return
             self._manual_override = False
             self.coordinator.set_child_school_mode_override(self.child_id, False)
+            restore_map = getattr(self.coordinator, "_school_mode_day_off_restore_at", None)
+            if restore_dt is not None and isinstance(restore_map, dict):
+                restore_map[self.child_id] = restore_dt
+                child_data = self._child_data
+                if isinstance(child_data, dict) and child_data:
+                    child_data["school_mode_restore_at"] = restore_dt.isoformat()
         elif last_state.state == "on" and last_state.attributes.get("manual_override") is True:
             self._manual_override = True
             self.coordinator.set_child_school_mode_override(self.child_id, True)
@@ -104,10 +124,17 @@ class GarminJrSchoolModeSwitch(
     @property
     def is_on(self) -> bool:
         """Return true if School Mode is enabled for this child."""
-        if self._manual_override is not None:
+        child_data = self._child_data
+        if "school_mode_override" in child_data and child_data["school_mode_override"] is not None:
+            return bool(child_data["school_mode_override"])
+        coord_overrides = getattr(self.coordinator, "_school_mode_overrides", None)
+        if isinstance(coord_overrides, dict):
+            if self.child_id in coord_overrides:
+                return bool(coord_overrides[self.child_id])
+            self._manual_override = None
+        elif self._manual_override is not None:
             return self._manual_override
 
-        child_data = self._child_data
         settings = child_data.get("settings") or {}
         school_mode = child_data.get("school_mode") or settings.get("schoolMode") or settings.get("school_mode") or {}
 
@@ -126,11 +153,16 @@ class GarminJrSchoolModeSwitch(
             child_data["school_mode"]["mode"] = "Restricted"
             child_data["school_mode"]["enabled"] = True
         self.coordinator.set_child_school_mode_override(self.child_id, True)
+        sync_fn = getattr(self.coordinator, "async_sync_child_school_mode", None)
+        if callable(sync_fn):
+            res = sync_fn(self.child_id, True)
+            if inspect.isawaitable(res):
+                await res
         self.async_write_ha_state()
         _LOGGER.info("Garmin Jr: School Mode enabled for child %s", self.child_id)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        """Turn off School Mode (e.g. for holiday / vacation / weekend)."""
+        """Turn off School Mode (e.g. for holiday / vacation / weekend / ped day)."""
         self._manual_override = False
         child_data = self._child_data
         if "school_mode" in child_data and isinstance(child_data["school_mode"], dict):
@@ -139,6 +171,11 @@ class GarminJrSchoolModeSwitch(
         self.coordinator.set_child_school_mode_override(self.child_id, False)
         # Immediately lift any coordinator pause
         self.coordinator.reset_school_mode_pause()
+        sync_fn = getattr(self.coordinator, "async_sync_child_school_mode", None)
+        if callable(sync_fn):
+            res = sync_fn(self.child_id, False)
+            if inspect.isawaitable(res):
+                await res
         self.async_write_ha_state()
         _LOGGER.info(
             "Garmin Jr: School Mode disabled for child %s (holiday/override). Full tracking active.",
@@ -164,6 +201,13 @@ class GarminJrSchoolModeSwitch(
             in_school = get_child_school_mode_end_time(child_data, options=entry_opts) is not None
         operating_mode = get_child_operating_mode(child_data) if self.is_on else "active"
 
+        coord_overrides = getattr(self.coordinator, "_school_mode_overrides", None)
+        effective_override: bool | None = self._manual_override
+        if "school_mode_override" in child_data and child_data["school_mode_override"] is not None:
+            effective_override = bool(child_data["school_mode_override"])
+        elif isinstance(coord_overrides, dict):
+            effective_override = bool(coord_overrides[self.child_id]) if self.child_id in coord_overrides else None
+
         return {
             "start_time": start_time,
             "end_time": end_time,
@@ -173,8 +217,9 @@ class GarminJrSchoolModeSwitch(
             "mode": mode,
             "in_school_mode": in_school,
             "operating_mode": operating_mode,
-            "holiday_override": self._manual_override is False,
-            "manual_override": self._manual_override is not None,
+            "holiday_override": effective_override is False,
+            "manual_override": effective_override is not None,
+            "restore_at": child_data.get("school_mode_restore_at"),
         }
 
     @property

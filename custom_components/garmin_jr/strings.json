@@ -52,6 +52,7 @@
           "llm_model": "AI Bridge Model Name (default: gemma4-it-e2b-FLM)",
           "garage_cover_entity": "Garage Cover Entity (for watch open-garage command)",
           "home_safe_zone": "Home Safe Zone Name required to open garage (exact match)",
+          "school_safe_zone": "School Safe Zone Name for fast-polling pause (default: École)",
           "clear_learned_pks": "Reset learned child profile PK bindings"
         }
       }
