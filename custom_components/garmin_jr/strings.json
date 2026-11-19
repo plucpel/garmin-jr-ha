@@ -3,18 +3,19 @@
     "step": {
       "user": {
         "title": "Garmin Jr Authentication",
-        "description": "Choose how to authenticate with Garmin:",
-        "menu_options": {
-          "credentials": "Login with Email and Password",
-          "token": "Import Saved Session Token"
-        }
-      },
-      "credentials": {
-        "title": "Garmin Account Login",
-        "description": "Enter your Garmin Connect account credentials:",
+        "description": "Sign in with your Garmin Connect email and password, or paste saved session token JSON:",
         "data": {
           "email": "Email",
-          "password": "Password"
+          "password": "Password (optional when pasting tokens)",
+          "tokens": "Session Tokens JSON (Optional)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Reauthenticate Garmin Jr",
+        "description": "Your Garmin session for {email} expired or was revoked. Enter your password or paste updated session tokens:",
+        "data": {
+          "password": "Password (optional when pasting tokens)",
+          "tokens": "Session Tokens JSON (Optional)"
         }
       },
       "mfa": {
@@ -23,27 +24,18 @@
         "data": {
           "mfa_code": "MFA Code"
         }
-      },
-      "token": {
-        "title": "Import Garmin Session Token",
-        "description": "Provide a path to garmin_tokens.json or paste the token JSON:",
-        "data": {
-          "token_path": "Token File Path",
-          "token_data": "Raw Token JSON (Optional)"
-        }
       }
     },
     "error": {
       "cannot_connect": "Failed to connect to Garmin servers",
-      "invalid_auth": "Invalid email or password",
+      "invalid_auth": "Invalid email, password, or session token",
       "invalid_mfa": "Invalid MFA verification code",
-      "invalid_token_file": "Failed to read token file",
-      "invalid_token_json": "Invalid JSON format in token data",
-      "token_expired": "Session token is expired and could not be refreshed",
+      "invalid_tokens_json": "Invalid JSON format in token data",
       "unknown": "Unexpected error occurred"
     },
     "abort": {
-      "already_configured": "This Garmin account or token is already configured."
+      "already_configured": "This Garmin account is already configured.",
+      "reauth_successful": "Reauthentication succeeded."
     }
   },
   "options": {
@@ -57,7 +49,10 @@
           "school_mode_end_time": "Default School Mode end time (HH:MM)",
           "night_mode_enabled": "Enable Night Mode (relax polling to 5m during sleep hours)",
           "llm_url": "AI Bridge / LLM URL (e.g. http://192.168.1.50:13305)",
-          "llm_model": "AI Bridge Model Name (default: gemma4-it-e2b-FLM)"
+          "llm_model": "AI Bridge Model Name (default: gemma4-it-e2b-FLM)",
+          "garage_cover_entity": "Garage Cover Entity (for watch open-garage command)",
+          "home_safe_zone": "Home Safe Zone Name required to open garage (exact match)",
+          "clear_learned_pks": "Reset learned child profile PK bindings"
         }
       }
     }

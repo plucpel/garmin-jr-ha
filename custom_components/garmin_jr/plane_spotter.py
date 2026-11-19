@@ -4,6 +4,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import logging
 import math
+import threading
 import time
 from typing import Any
 
@@ -13,19 +14,22 @@ from requests.adapters import HTTPAdapter
 _LOGGER = logging.getLogger(__name__)
 
 # Connection pooling & Keep-Alive session for fast flight lookups
+_SPOTTER_LOCK = threading.Lock()
 _SPOTTER_SESSION: requests.Session | None = None
 
 
 def get_spotter_session() -> requests.Session:
     """Get or initialize thread-safe persistent requests session with connection pooling."""
     global _SPOTTER_SESSION
-    if _SPOTTER_SESSION is None:
-        _SPOTTER_SESSION = requests.Session()
-        adapter = HTTPAdapter(pool_connections=10, pool_maxsize=20, max_retries=1)
-        _SPOTTER_SESSION.mount("https://", adapter)
-        _SPOTTER_SESSION.mount("http://", adapter)
-        _SPOTTER_SESSION.headers.update({"User-Agent": "GarminJr-Spotter/1.5.0"})
-    return _SPOTTER_SESSION
+    with _SPOTTER_LOCK:
+        if _SPOTTER_SESSION is None:
+            session = requests.Session()
+            adapter = HTTPAdapter(pool_connections=10, pool_maxsize=20, max_retries=1)
+            session.mount("https://", adapter)
+            session.mount("http://", adapter)
+            session.headers.update({"User-Agent": "GarminJr-Spotter/1.5.0"})
+            _SPOTTER_SESSION = session
+        return _SPOTTER_SESSION
 
 
 # RAM cache for pre-fetched overhead airspace (20s TTL)
@@ -406,28 +410,17 @@ def bearing_to_cardinal(deg: float, language: str = "fr") -> str:
 def resolve_kid_location(
     hass: Any, kid_data: dict[str, Any], kid_id: str
 ) -> dict[str, Any]:
-    """Resolve child location using 3-tier priority: HA Zone > Garmin Geofence > Watch GPS."""
-    # 1. Check if matched to a known Home Assistant Zone
-    matched_zone_name = kid_data.get("matched_ha_zone")
-    if matched_zone_name:
-        for state in hass.states.async_all("zone"):
-            if state.name.lower() == matched_zone_name.lower() or state.entity_id.lower() == f"zone.{matched_zone_name.lower()}":
-                lat = state.attributes.get("latitude")
-                lon = state.attributes.get("longitude")
-                if lat is not None and lon is not None:
-                    return {
-                        "latitude": float(lat),
-                        "longitude": float(lon),
-                        "source": "ha_zone",
-                        "zone_name": state.name,
-                        "stale": False,
-                    }
+    """Resolve child location using priority: Garmin Geofence > Watch GPS > Home Assistant default."""
+    # 1. Check if inside an active Garmin Safe Zone / Geofence (read exact coordinator keys safely off-loop)
+    active_gf_name = kid_data.get("garmin_safe_zone") or kid_data.get("active_geofence_name")
+    gf_lat = kid_data.get("geofence_latitude")
+    if gf_lat is None:
+        gf_lat = kid_data.get("geofence_lat")
+    gf_lon = kid_data.get("geofence_longitude")
+    if gf_lon is None:
+        gf_lon = kid_data.get("geofence_lon")
 
-    # 2. Check if inside an active Garmin Safe Zone / Geofence
-    active_gf_name = kid_data.get("active_geofence_name")
-    gf_lat = kid_data.get("geofence_lat")
-    gf_lon = kid_data.get("geofence_lon")
-    if active_gf_name and gf_lat is not None and gf_lon is not None:
+    if active_gf_name and active_gf_name != "Outside" and gf_lat is not None and gf_lon is not None:
         return {
             "latitude": float(gf_lat),
             "longitude": float(gf_lon),
@@ -436,7 +429,7 @@ def resolve_kid_location(
             "stale": False,
         }
 
-    # 3. Fallback: Last known watch GPS trackpoint
+    # 2. Fallback: Last known watch GPS trackpoint
     gps_lat = kid_data.get("latitude")
     gps_lon = kid_data.get("longitude")
     loc_ts = kid_data.get("location_timestamp") or kid_data.get("last_sync")
@@ -586,7 +579,7 @@ def fetch_live_aircraft_sync(
 
     try:
         url = f"{OPENSKY_API_URL}?lamin={lamin:.4f}&lomin={lomin:.4f}&lamax={lamax:.4f}&lomax={lomax:.4f}"
-        resp = requests.get(url, timeout=3)
+        resp = session.get(url, timeout=3)
         if resp.status_code == 200:
             data = resp.json()
             states = data.get("states") or []

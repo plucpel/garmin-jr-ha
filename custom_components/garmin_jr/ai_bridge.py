@@ -3,8 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-import datetime
-import json
+import contextlib
 import logging
 import re
 import time
@@ -15,17 +14,19 @@ from requests.adapters import HTTPAdapter
 
 from .const import (
     ATTR_CHILD_NAME,
+    DEFAULT_GARAGE_COVER_ENTITY,
+    DEFAULT_HOME_SAFE_ZONE,
     DEFAULT_LLM_MODEL,
     DEFAULT_LLM_URL,
     DOMAIN,
     LOGGER,
 )
+from .garmin_client import resolve_trackpoints_and_safe_zone
 from .plane_spotter import (
     enrich_flight_details,
     fetch_live_aircraft_sync,
     filter_and_rank_planes,
     format_bounce_response,
-    haversine_bearing_elevation,
     resolve_kid_location,
 )
 
@@ -35,6 +36,13 @@ DEFAULT_STRIX_HALO_URL = DEFAULT_LLM_URL
 DEFAULT_MODEL = DEFAULT_LLM_MODEL
 MAX_HISTORY_TURNS = 6
 FLIGHT_CONTEXT_TTL_SECONDS = 1200  # 20 minutes
+
+
+def _sanitize_prompt_field(val: Any, max_len: int = 60) -> str:
+    """Strip control characters and action-spoofing tokens from untrusted external API strings."""
+    cleaned = re.sub(r"[\r\n\x00-\x1f]+", " ", str(val or "")).strip()
+    cleaned = re.sub(r"\bACTION\s*:", "", cleaned, flags=re.IGNORECASE).strip()
+    return cleaned[:max_len]
 
 
 class ChildSession:
@@ -67,15 +75,18 @@ class ChildSession:
             return None
 
         f = self.last_spotted_flight
-        airline = f.get("airline") or "Inconnu"
-        callsign = f.get("callsign_iata") or f.get("callsign") or ""
-        model = f.get("model_name") or "Avion de ligne"
-        route = f.get("route") or "Vol privé / nolisé (sans horaire public)"
+        airline = _sanitize_prompt_field(f.get("airline") or "Inconnu")
+        callsign = _sanitize_prompt_field(f.get("callsign_iata") or f.get("callsign") or "")
+        model = _sanitize_prompt_field(f.get("model_name") or "Avion de ligne")
+        route = _sanitize_prompt_field(f.get("route") or "Vol privé / nolisé (sans horaire public)", max_len=80)
         alt_ft = int(round(f.get("altitude_ft", 0)))
+        alt_ft_str = f"{alt_ft:,}".replace(",", " ")
         speed_kmh = int(round(f.get("speed_kmh", 0)))
 
-        ctx = f"Dernier avion repéré : {airline} ({callsign}), modèle {model}, trajet {route}, altitude {alt_ft:,} pi, vitesse {speed_kmh} km/h."
-        return ctx.replace(",", " ")
+        return (
+            f"Dernier avion repéré : {airline} ({callsign}), modèle {model}, "
+            f"trajet {route}, altitude {alt_ft_str} pi, vitesse {speed_kmh} km/h."
+        )
 
 
 class GarminBounceAiBridge:
@@ -96,6 +107,11 @@ class GarminBounceAiBridge:
         adapter = HTTPAdapter(pool_connections=5, pool_maxsize=10, max_retries=1)
         self.http_session.mount("http://", adapter)
         self.http_session.mount("https://", adapter)
+
+    def close(self) -> None:
+        """Close the HTTP session on unload."""
+        with contextlib.suppress(Exception):
+            self.http_session.close()
 
     def get_session(self, child_id: str) -> ChildSession:
         """Retrieve or create child session."""
@@ -136,6 +152,9 @@ class GarminBounceAiBridge:
         child_data: dict[str, Any],
         base_url: str | None = None,
         model: str | None = None,
+        garage_cover_entity: str | None = None,
+        home_safe_zone: str | None = None,
+        context: Any = None,
     ) -> str:
         """Process incoming voice/text message through Strix Halo NPU and execute appropriate action."""
         session = self.get_session(child_id)
@@ -178,28 +197,40 @@ class GarminBounceAiBridge:
 
         # 2. Handle LLM output or Fallback
         if not raw_reply:
-            return self._fallback_handler(clean_text, child_id, child_name, child_data, session)
-
-        # 3. Action Dispatching
-        upper_reply = raw_reply.upper()
-
-        # Check intent for open garage (either from LLM ACTION: OPEN_GARAGE or explicit open intent in message)
-        is_open_garage = (
-            "OPEN_GARAGE" in upper_reply
-            or (
-                bool(re.search(r"\b(ouvre|ouvrir|ouvrez|open)\b", clean_text, re.IGNORECASE))
-                and not bool(re.search(r"\b(avion|plane|fen[eê]tre|app|application)\b", clean_text, re.IGNORECASE))
+            return self._fallback_handler(
+                clean_text,
+                child_id,
+                child_name,
+                child_data,
+                session,
+                garage_cover_entity=garage_cover_entity,
+                home_safe_zone=home_safe_zone,
+                context=context,
             )
+
+        # 3. Action Dispatching: parse explicit ACTION directives strictly at start of reply,
+        #    while keeping the open-verb regex convenience path for 2B LLM natural-language drift.
+        llm_open_garage = bool(re.match(r"^\s*(?:ACTION\s*:\s*)?OPEN_GARAGE\b", raw_reply, re.IGNORECASE))
+        llm_spot_plane = bool(re.match(r"^\s*(?:ACTION\s*:\s*)?SPOT_PLANE\b", raw_reply, re.IGNORECASE))
+
+        is_open_garage = llm_open_garage or (
+            bool(re.search(r"\b(ouvre|ouvrir|ouvrez|open)\b", clean_text, re.IGNORECASE))
+            and not bool(re.search(r"\b(avion|plane|fen[eê]tre|app|application)\b", clean_text, re.IGNORECASE))
         )
 
-        if "SPOT_PLANE" in upper_reply or (not is_open_garage and any(w in clean_text.lower() for w in ("quel est cet avion", "avion passe", "spot plane"))):
+        if llm_spot_plane or (not is_open_garage and any(w in clean_text.lower() for w in ("quel est cet avion", "avion passe", "spot plane"))):
             result = self._execute_spot_plane(child_id, child_data, session)
             session.add_turn("user", clean_text)
             session.add_turn("assistant", result)
             return result
 
         if is_open_garage:
-            result = self._execute_open_garage(child_data)
+            result = self._execute_open_garage(
+                child_data,
+                cover_entity=garage_cover_entity,
+                home_safe_zone=home_safe_zone,
+                context=context,
+            )
             session.add_turn("user", clean_text)
             session.add_turn("assistant", result)
             return result
@@ -234,77 +265,15 @@ class GarminBounceAiBridge:
 
         return format_bounce_response(top_plane, loc_info, language="fr")
 
-    def _is_child_near_home(self, child_data: dict[str, Any]) -> bool:
-        """Return True if child_data, device_tracker state, or GPS coordinates indicate the child is at/near home."""
+    def _is_child_near_home(self, child_data: dict[str, Any], home_safe_zone: str | None = None) -> bool:
+        """Return True strictly when child_data shows the child is in the configured Home Safe Zone."""
+        target_zone = (home_safe_zone or DEFAULT_HOME_SAFE_ZONE).strip().lower()
         safe_zone = str(
-            child_data.get("active_geofence_name")
-            or child_data.get("garmin_safe_zone")
-            or child_data.get("matched_ha_zone")
+            child_data.get("garmin_safe_zone")
+            or child_data.get("active_geofence_name")
             or ""
-        ).lower()
-
-        child_id = str(child_data.get("child_id") or child_data.get("id") or "")
-        child_name = str(child_data.get("child_name") or child_data.get("displayName") or "").lower().replace(" ", "_")
-        tracker_entities = [
-            f"device_tracker.garmin_jr_{child_id}_tracker",
-            f"device_tracker.garmin_jr_{child_id}_location",
-            f"device_tracker.{child_name}_location",
-            f"device_tracker.{child_name}_{child_name}_location",
-        ]
-
-        if (
-            "papa" in safe_zone
-            or "home" in safe_zone
-            or "maison" in safe_zone
-            or "home_zone" in safe_zone
-            or "cabanon" in safe_zone
-            or (
-                hasattr(self.hass, "states")
-                and any(
-                    (state := self.hass.states.get(entity_id)) is not None
-                    and str(state.state).lower() in ("home", "papa", "maison", "zone.home", "cabanon")
-                    for entity_id in tracker_entities
-                )
-            )
-        ):
-            return True
-
-        kid_lat = child_data.get("latitude")
-        kid_lon = child_data.get("longitude")
-        if kid_lat is not None and kid_lon is not None:
-            # 1. Check GPS distance to Home Assistant home zone (< 500 meters)
-            if hasattr(self.hass, "config") and self.hass.config:
-                home_lat = getattr(self.hass.config, "latitude", None)
-                home_lon = getattr(self.hass.config, "longitude", None)
-                if home_lat is not None and home_lon is not None:
-                    try:
-                        dist_m, _, _ = haversine_bearing_elevation(
-                            float(home_lat), float(home_lon), float(kid_lat), float(kid_lon), 0.0
-                        )
-                        if dist_m <= 500.0:
-                            _LOGGER.debug("Garmin Jr: Child GPS is within %.1fm of home (near home)", dist_m)
-                            return True
-                    except Exception as dist_err:
-                        _LOGGER.debug("Error computing distance to home: %s", dist_err)
-
-            # 2. Check GPS distance to any configured Papa/Home Garmin geofence (< 500 meters)
-            for gf in child_data.get("geofences") or []:
-                gf_name = str(gf.get("name") or "").lower()
-                if any(k in gf_name for k in ("papa", "home", "maison", "home_zone")):
-                    gf_lat = gf.get("latitude")
-                    gf_lon = gf.get("longitude")
-                    if gf_lat is not None and gf_lon is not None:
-                        try:
-                            dist_m, _, _ = haversine_bearing_elevation(
-                                float(gf_lat), float(gf_lon), float(kid_lat), float(kid_lon), 0.0
-                            )
-                            if dist_m <= 500.0:
-                                _LOGGER.debug("Garmin Jr: Child GPS is within %.1fm of %s geofence", dist_m, gf.get("name"))
-                                return True
-                        except Exception:
-                            continue
-
-        return False
+        ).strip().lower()
+        return bool(safe_zone and target_zone and safe_zone == target_zone)
 
     def _find_garmin_client_and_coordinator(self, child_id: str) -> tuple[Any, Any]:
         """Locate the active GarminJrClient and coordinator for a child."""
@@ -322,7 +291,7 @@ class GarminBounceAiBridge:
         return None, None
 
     def _refresh_child_location_live(self, child_data: dict[str, Any]) -> bool:
-        """Fetch latest trackpoints live from Garmin Cloud and update child_data in place."""
+        """Fetch latest trackpoints live from Garmin Cloud and update child state safely."""
         child_id = str(child_data.get("child_id") or child_data.get("id") or "")
         connect_id = (
             child_data.get("connectId")
@@ -338,105 +307,83 @@ class GarminBounceAiBridge:
             if not trackpoints:
                 return False
 
-            trackpoints.sort(
-                key=lambda tp: str(tp.get("timestamp") or tp.get("dateTime") or tp.get("date") or "")
+            resolved = resolve_trackpoints_and_safe_zone(
+                trackpoints,
+                child_data.get("geofences") or [],
+                prev_record=child_data,
             )
-            latest_pt = trackpoints[-1]
-            pos = latest_pt.get("position") or {}
-            raw_lat = pos.get("lat")
-            raw_lon = pos.get("lon")
-            if raw_lat is not None and raw_lon is not None:
-                latitude = raw_lat * (180.0 / 2147483648.0)
-                longitude = raw_lon * (180.0 / 2147483648.0)
+            updates = {
+                key: resolved[key]
+                for key in (
+                    "latitude",
+                    "longitude",
+                    "gps_accuracy",
+                    "location_timestamp",
+                    "fix_type",
+                    "garmin_safe_zone",
+                    "garmin_geofence_id",
+                    "has_wifi",
+                    "geofence_latitude",
+                    "geofence_longitude",
+                    "geofence_radius",
+                )
+            }
+            if resolved.get("garmin_safe_zone"):
+                updates["active_geofence_name"] = resolved["garmin_safe_zone"]
+
+            # Update caller's child_data copy for immediate decision making
+            child_data.update(updates)
+
+            # Mutate shared coordinator/client caches on the HA event loop cleanly
+            def _apply_on_loop() -> None:
+                coord_data = getattr(coordinator, "data", None) if coordinator is not None else None
+                if isinstance(coord_data, dict) and child_id in coord_data and coord_data[child_id] is not child_data:
+                    coord_data[child_id].update(updates)
+                client_lock = getattr(client, "_lock", None)
+                last_results = getattr(client, "_last_results", None)
+                if isinstance(last_results, dict) and child_id in last_results:
+                    if client_lock is not None:
+                        with client_lock:
+                            last_results[child_id].update(updates)
+                    else:
+                        last_results[child_id].update(updates)
+                if coordinator is not None and hasattr(coordinator, "async_update_listeners"):
+                    coordinator.async_update_listeners()
+
+            if hasattr(self.hass, "loop") and self.hass.loop.is_running():
+                self.hass.loop.call_soon_threadsafe(_apply_on_loop)
             else:
-                latitude = latest_pt.get("latitude") or pos.get("latitude")
-                longitude = latest_pt.get("longitude") or pos.get("longitude")
+                _apply_on_loop()
 
-            if latitude is not None and longitude is not None:
-                child_data["latitude"] = latitude
-                child_data["longitude"] = longitude
-            child_data["gps_accuracy"] = latest_pt.get("accuracy") or latest_pt.get("accuracyMeters") or child_data.get("gps_accuracy", 15)
-            child_data["location_timestamp"] = (
-                latest_pt.get("timestamp")
-                or latest_pt.get("dateTime")
-                or latest_pt.get("date")
-                or child_data.get("location_timestamp")
-            )
-            if latest_pt.get("fixType"):
-                child_data["fix_type"] = latest_pt.get("fixType")
-
-            geofences = child_data.get("geofences") or []
-            geofence_by_id = {str(g.get("id")): g for g in geofences if g.get("id") is not None}
-            active_geofence_name = None
-            active_geofence_id = None
-
-            for tp in reversed(trackpoints):
-                fp_data = tp.get("familyPointData") or {}
-                for sc in fp_data.get("statusChanges") or []:
-                    dev_state = str(sc.get("deviceState") or "").upper().replace("_", "")
-                    g_id = sc.get("geofenceId")
-                    if dev_state == "GEOFENCEENTER" and g_id is not None:
-                        active_geofence_id = str(g_id)
-                        gf = geofence_by_id.get(active_geofence_id)
-                        active_geofence_name = (gf.get("name") if gf else None) or f"Zone {active_geofence_id}"
-                        break
-                    elif dev_state == "GEOFENCEEXIT":
-                        active_geofence_name = "Outside"
-                        break
-                if active_geofence_name is not None:
-                    break
-
-            if active_geofence_name is not None:
-                child_data["garmin_safe_zone"] = active_geofence_name
-                child_data["active_geofence_name"] = active_geofence_name
-                child_data["garmin_geofence_id"] = active_geofence_id
-
-            last_results = getattr(client, "_last_results", None)
-            if isinstance(last_results, dict) and child_id in last_results:
-                for key in ("latitude", "longitude", "gps_accuracy", "location_timestamp", "fix_type", "garmin_safe_zone", "garmin_geofence_id"):
-                    if key in child_data:
-                        last_results[child_id][key] = child_data[key]
-
-            if (
-                coordinator is not None
-                and hasattr(coordinator, "async_update_listeners")
-                and hasattr(self.hass, "loop")
-                and self.hass.loop.is_running()
-            ):
-                self.hass.loop.call_soon_threadsafe(coordinator.async_update_listeners)
-
-            _LOGGER.info(
-                "Garmin Jr: Live location check for %s updated safe_zone=%s, coords=(%s, %s) at %s",
+            _LOGGER.debug(
+                "Garmin Jr: Live cloud check for %s updated safe_zone=%s",
                 child_id,
-                child_data.get("garmin_safe_zone"),
-                child_data.get("latitude"),
-                child_data.get("longitude"),
-                child_data.get("location_timestamp"),
+                updates.get("garmin_safe_zone"),
             )
             return True
         except Exception as err:
             _LOGGER.debug("Live location refresh during garage check failed: %s", err)
             return False
 
-    def _execute_open_garage(self, child_data: dict[str, Any]) -> str:
-        """Check safe zone presence (with live cloud trackpoint fallback) and trigger garage door opening."""
-        is_near_home = self._is_child_near_home(child_data)
+    def _execute_open_garage(
+        self,
+        child_data: dict[str, Any],
+        cover_entity: str | None = None,
+        home_safe_zone: str | None = None,
+        context: Any = None,
+    ) -> str:
+        """Check configured Home Safe Zone presence (with live cloud trackpoint check) and open garage cover."""
+        is_near_home = self._is_child_near_home(child_data, home_safe_zone=home_safe_zone)
 
         if not is_near_home:
-            _LOGGER.debug("Garmin Jr: Cached state indicates child is not home; fetching live trackpoints before rejecting garage open")
+            _LOGGER.debug("Garmin Jr: Cached safe zone != target; fetching live trackpoints before rejecting garage open")
             if self._refresh_child_location_live(child_data):
-                is_near_home = self._is_child_near_home(child_data)
+                is_near_home = self._is_child_near_home(child_data, home_safe_zone=home_safe_zone)
 
         if not is_near_home:
-            child_id = str(child_data.get("child_id") or child_data.get("id") or "")
-            device_id = child_data.get("device_id") or child_data.get("deviceId") or child_id
-            client, _ = self._find_garmin_client_and_coordinator(child_id)
-            if client is not None and device_id and hasattr(client, "request_location_update"):
-                try:
-                    client.request_location_update(device_id)
-                except Exception:
-                    pass
             return "Tu n'es pas à la maison pour ouvrir le garage! 🏠"
+
+        target_cover = (cover_entity or DEFAULT_GARAGE_COVER_ENTITY).strip() or DEFAULT_GARAGE_COVER_ENTITY
 
         try:
             # Fire-and-forget on the HA main event loop. blocking=True would wait
@@ -448,12 +395,18 @@ class GarminBounceAiBridge:
                 raise RuntimeError("Home Assistant service registry unavailable")
             if not (hasattr(self.hass, "loop") and self.hass.loop.is_running()):
                 raise RuntimeError("Home Assistant event loop is not running")
+            call_kwargs: dict[str, Any] = {
+                "target": {"entity_id": target_cover},
+                "blocking": False,
+            }
+            if context is not None:
+                call_kwargs["context"] = context
+
             future = asyncio.run_coroutine_threadsafe(
                 self.hass.services.async_call(
                     "cover",
                     "open_cover",
-                    target={"entity_id": "cover.garage_door"},
-                    blocking=False,
+                    **call_kwargs,
                 ),
                 self.hass.loop,
             )
@@ -461,14 +414,14 @@ class GarminBounceAiBridge:
             def _log_dispatch_result(fut: "concurrent.futures.Future") -> None:
                 err = fut.exception()
                 if err:
-                    _LOGGER.error("cover.open_cover dispatch failed: %s", err)
+                    _LOGGER.error("cover.open_cover dispatch failed for %s: %s", target_cover, err)
                 else:
-                    _LOGGER.info("Garmin Jr: Dispatched cover.open_cover for cover.garage_door")
+                    _LOGGER.info("Garmin Jr: Dispatched cover.open_cover for %s", target_cover)
 
             future.add_done_callback(_log_dispatch_result)
             return "J'ouvre la porte du garage! 🚪 Sois prudent!"
         except Exception as err:
-            _LOGGER.error("Failed to open garage door via service call: %s", err)
+            _LOGGER.error("Failed to open garage door (%s) via service call: %s", target_cover, err)
             return "Erreur lors de l'ouverture du garage! ⚠️"
 
     def _fallback_handler(
@@ -478,11 +431,19 @@ class GarminBounceAiBridge:
         child_name: str,
         child_data: dict[str, Any],
         session: ChildSession,
+        garage_cover_entity: str | None = None,
+        home_safe_zone: str | None = None,
+        context: Any = None,
     ) -> str:
-        """Rule-based fallback when Strix Halo inference server is offline."""
+        """Rule-based fallback when inference server is offline."""
         lower = text.lower()
         if any(w in lower for w in ("avion", "plane", "vole", "ciel", "vol")):
             return self._execute_spot_plane(child_id, child_data, session)
-        if any(w in lower for w in ("garage", "porte")) or re.search(r"\b(ouvre|ouvrir|ouvrez|open)\b", lower):
-            return self._execute_open_garage(child_data)
+        if re.search(r"\b(garage|porte|ouvre|ouvrir|ouvrez|open)\b", lower):
+            return self._execute_open_garage(
+                child_data,
+                cover_entity=garage_cover_entity,
+                home_safe_zone=home_safe_zone,
+                context=context,
+            )
         return "Message bien reçu! 👍"

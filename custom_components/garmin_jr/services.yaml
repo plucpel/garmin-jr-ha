@@ -60,3 +60,41 @@ spot_plane:
             - label: English
               value: 'en'
 
+process_bounce_message:
+  name: Process Bounce Message
+  description: Route a verified incoming Garmin Bounce child message through the AI bridge.
+  fields:
+    target:
+      name: Target Child
+      description: The name or child profile ID of the child.
+      required: true
+      example: 'Leo'
+      selector:
+        text:
+    text:
+      name: Message Text
+      description: Incoming text or voice transcription from the child's watch.
+      required: false
+      example: 'Quel est cet avion ?'
+      selector:
+        text:
+    message:
+      name: Message (Alias)
+      description: Alias for Message Text.
+      required: false
+      selector:
+        text:
+    message_id:
+      name: Verified Message ID
+      description: Optional event message_id for replay/spoofing verification.
+      required: false
+      selector:
+        text:
+    send_to_watch:
+      name: Send Reply To Watch
+      description: Whether to send the generated reply back to the child's watch.
+      required: false
+      default: true
+      selector:
+        boolean:
+

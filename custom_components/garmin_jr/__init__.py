@@ -1,12 +1,16 @@
 """Garmin Jr Integration for Home Assistant."""
 from __future__ import annotations
 
+import contextlib
 import logging
 from typing import Any
 
+import voluptuous as vol
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceResponse, SupportsResponse
-from homeassistant.helpers import device_registry as dr
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import config_validation as cv, device_registry as dr
 
 from .ai_bridge import GarminBounceAiBridge
 from .const import (
@@ -14,6 +18,7 @@ from .const import (
     ATTR_CHILD_NAME,
     ATTR_LANGUAGE,
     ATTR_MESSAGE,
+    ATTR_MESSAGE_ID,
     ATTR_SEND_TO_WATCH,
     ATTR_TARGET,
     ATTR_TEXT,
@@ -22,10 +27,14 @@ from .const import (
     CONF_DI_REFRESH_TOKEN,
     CONF_DI_TOKEN,
     CONF_EMAIL,
+    CONF_GARAGE_COVER_ENTITY,
+    CONF_HOME_SAFE_ZONE,
     CONF_LLM_MODEL,
     CONF_LLM_URL,
     CONF_PASSWORD,
     CONF_TOKEN_DATA,
+    DEFAULT_GARAGE_COVER_ENTITY,
+    DEFAULT_HOME_SAFE_ZONE,
     DEFAULT_LLM_MODEL,
     DEFAULT_LLM_URL,
     DOMAIN,
@@ -37,7 +46,6 @@ from .const import (
     SERVICE_SPOT_PLANE,
 )
 from .coordinator import (
-    FAST_MESSAGE_POLL_INTERVAL_SECONDS,
     GarminJrDataUpdateCoordinator,
     resolve_child_profile_pk,
 )
@@ -52,20 +60,59 @@ from .plane_spotter import (
 
 _LOGGER = logging.getLogger(__name__)
 
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+SERVICE_SEND_MESSAGE_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_TARGET, default=""): str,
+        vol.Required(ATTR_MESSAGE): str,
+    }
+)
+
+SERVICE_REQUEST_LOCATION_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_TARGET, default=""): str,
+    }
+)
+
+SERVICE_SPOT_PLANE_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_TARGET, default=""): str,
+        vol.Optional(ATTR_SEND_TO_WATCH, default=True): bool,
+        vol.Optional(ATTR_LANGUAGE, default="fr"): str,
+    }
+)
+
+SERVICE_PROCESS_BOUNCE_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_TARGET): str,
+        vol.Optional(ATTR_TEXT, default=""): str,
+        vol.Optional(ATTR_MESSAGE, default=""): str,
+        vol.Optional(ATTR_MESSAGE_ID, default=""): str,
+        vol.Optional(ATTR_SEND_TO_WATCH, default=True): bool,
+    }
+)
+
 
 def find_child_target(
-    hass: HomeAssistant, target: str
+    hass: HomeAssistant,
+    target: str,
+    allow_default: bool = True,
 ) -> tuple[GarminJrDataUpdateCoordinator | None, str | None, dict[str, Any] | None, str | int | None, str | int | None]:
     """Find a coordinator and child matching the target string by ID or Name.
 
     Returns: (coordinator, kid_id, kid_data, target_pk, target_device_id)
     """
+    clean_target = (target or "").strip()
+    if not clean_target and not allow_default:
+        return None, None, None, None, None
+
     for entry_id, coordinator in hass.data.get(DOMAIN, {}).items():
         if not isinstance(coordinator, GarminJrDataUpdateCoordinator) or not coordinator.data:
             continue
 
         for kid_id, kid_data in coordinator.data.items():
-            if not target or target.lower() in (
+            if not clean_target or clean_target.lower() in (
                 str(kid_id).lower(),
                 str(kid_data.get(ATTR_CHILD_NAME, "")).lower(),
             ):
@@ -102,32 +149,31 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
             return
 
         coordinator, kid_id, kid_data, target_pk, _ = find_child_target(hass, target)
-        if coordinator and target_pk:
-            success = await hass.async_add_executor_job(
-                coordinator.client.send_text_message, target_pk, message
-            )
-            if success:
-                _LOGGER.debug("Sent Garmin Jr message to %s", target_pk)
-                await coordinator.async_request_refresh()
-            return
+        if not coordinator or not target_pk:
+            raise HomeAssistantError(f"Could not find Garmin Jr child profile matching target: {target}")
 
-        _LOGGER.warning("Could not find Garmin Jr child profile matching target: %s", target)
+        success = await hass.async_add_executor_job(
+            coordinator.client.send_text_message, target_pk, message
+        )
+        if not success:
+            raise HomeAssistantError(f"Failed to send Garmin Jr message to profile {target_pk}")
+        _LOGGER.debug("Sent Garmin Jr message to %s", target_pk)
 
     async def async_handle_request_location_update(call: Any) -> None:
         """Handle request_location_update service call."""
         target = str(call.data.get(ATTR_TARGET, "")).strip()
 
         coordinator, kid_id, kid_data, _, target_device_id = find_child_target(hass, target)
-        if coordinator and target_device_id:
-            success = await hass.async_add_executor_job(
-                coordinator.client.request_location_update, target_device_id
-            )
-            if success:
-                _LOGGER.debug("Requested location refresh for %s", target_device_id)
-                await coordinator.async_request_refresh()
-            return
+        if not coordinator or not target_device_id:
+            raise HomeAssistantError(f"Could not find Garmin Jr child profile matching target: {target}")
 
-        _LOGGER.warning("Could not find Garmin Jr child profile matching target: %s", target)
+        success = await hass.async_add_executor_job(
+            coordinator.client.request_location_update, target_device_id
+        )
+        if not success:
+            raise HomeAssistantError(f"Failed to dispatch Garmin Jr location update for {target_device_id}")
+        _LOGGER.debug("Requested location refresh for %s", target_device_id)
+        await coordinator.async_request_refresh()
 
     async def async_handle_spot_plane(call: Any) -> ServiceResponse:
         """Handle spot_plane service call: find overhead planes and optionally message watch."""
@@ -137,13 +183,14 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
 
         coordinator, target_kid_id, target_kid_data, target_pk, target_device_id = find_child_target(hass, target)
         if coordinator and target_kid_id and target_kid_data:
-            # 1. Resolve 3-tier child location
+            # 1. Resolve child location safely without touching hass.states off-loop
             loc_info = resolve_kid_location(hass, target_kid_data, target_kid_id)
 
             # Asynchronous background refresh if location is stale
             if loc_info.get("stale") and loc_info.get("source") == "watch_gps":
                 _LOGGER.debug("Dispatching async background location refresh for %s (stale location)", target_kid_id)
                 device_target = target_device_id
+
                 async def _bg_location_refresh() -> None:
                     try:
                         await hass.async_add_executor_job(
@@ -166,7 +213,9 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
 
             top_plane = None
             if ranked_planes:
-                top_plane = enrich_flight_details(ranked_planes[0], language=language)
+                top_plane = await hass.async_add_executor_job(
+                    enrich_flight_details, ranked_planes[0], language
+                )
                 if ai_bridge:
                     ai_bridge.get_session(target_kid_id).set_spotted_flight(top_plane)
 
@@ -197,17 +246,36 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         }
 
     async def async_handle_process_bounce_message(call: Any) -> ServiceResponse:
-        """Handle incoming message from Bounce watch through Strix Halo NPU AI bridge."""
+        """Handle incoming message from Bounce watch through AI bridge."""
         target = str(call.data.get(ATTR_TARGET, "")).strip()
         incoming_text = str(call.data.get(ATTR_TEXT) or call.data.get(ATTR_MESSAGE) or "").strip()
+        message_id = str(call.data.get(ATTR_MESSAGE_ID) or "").strip()
         send_to_watch = call.data.get(ATTR_SEND_TO_WATCH, True)
 
-        coordinator, target_kid_id, target_kid_data, target_pk, _ = find_child_target(hass, target)
+        coordinator, target_kid_id, target_kid_data, target_pk, _ = find_child_target(
+            hass, target, allow_default=False
+        )
         if coordinator and target_kid_id and target_kid_data:
             child_name = target_kid_data.get(ATTR_CHILD_NAME, "Child")
+            verified_ids = getattr(coordinator, "_verified_child_message_ids", None)
+            if message_id and verified_ids is not None and message_id not in verified_ids:
+                _LOGGER.warning(
+                    "Ignoring process_bounce_message with unverified message_id %s for %s",
+                    message_id[-6:],
+                    child_name,
+                )
+                return {
+                    "reply": "",
+                    "child_id": target_kid_id,
+                    "child_name": child_name,
+                }
+
             options = getattr(coordinator.entry, "options", {}) if hasattr(coordinator, "entry") else {}
             llm_url = str(options.get(CONF_LLM_URL) or DEFAULT_LLM_URL)
             llm_model = str(options.get(CONF_LLM_MODEL) or DEFAULT_LLM_MODEL)
+            garage_cover = str(options.get(CONF_GARAGE_COVER_ENTITY) or DEFAULT_GARAGE_COVER_ENTITY)
+            home_safe_zone = str(options.get(CONF_HOME_SAFE_ZONE) or DEFAULT_HOME_SAFE_ZONE)
+            call_context = getattr(call, "context", None)
 
             reply = await hass.async_add_executor_job(
                 ai_bridge.process_incoming_message,
@@ -217,6 +285,9 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
                 target_kid_data,
                 llm_url,
                 llm_model,
+                garage_cover,
+                home_safe_zone,
+                call_context,
             )
 
             if send_to_watch and target_pk and reply:
@@ -230,27 +301,34 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
                 "child_name": child_name,
             }
 
-        _LOGGER.warning("Could not find Garmin Jr child profile matching target: %s", target)
+        _LOGGER.warning("Could not find Garmin Jr child profile matching explicit target: %s", target)
         return {
             "reply": "Enfant non trouvé",
             "child_id": None,
             "child_name": None,
         }
 
-    hass.services.async_register(DOMAIN, SERVICE_SEND_MESSAGE, async_handle_send_message)
     hass.services.async_register(
-        DOMAIN, SERVICE_REQUEST_LOCATION_UPDATE, async_handle_request_location_update
+        DOMAIN, SERVICE_SEND_MESSAGE, async_handle_send_message, schema=SERVICE_SEND_MESSAGE_SCHEMA
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_REQUEST_LOCATION_UPDATE,
+        async_handle_request_location_update,
+        schema=SERVICE_REQUEST_LOCATION_SCHEMA,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_SPOT_PLANE,
         async_handle_spot_plane,
+        schema=SERVICE_SPOT_PLANE_SCHEMA,
         supports_response=SupportsResponse.OPTIONAL,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_PROCESS_BOUNCE_MESSAGE,
         async_handle_process_bounce_message,
+        schema=SERVICE_PROCESS_BOUNCE_SCHEMA,
         supports_response=SupportsResponse.OPTIONAL,
     )
 
@@ -287,7 +365,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     coordinator.async_start_message_polling()
-    entry.async_on_unload(coordinator.async_unload)
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
 
     return True
@@ -295,13 +372,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
-    if coordinator and hasattr(coordinator, "async_unload"):
-        coordinator.async_unload()
-
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if coordinator:
+        if hasattr(coordinator, "async_unload"):
+            coordinator.async_unload()
+        client = getattr(coordinator, "client", None)
+        if client and hasattr(client, "close"):
+            with contextlib.suppress(Exception):
+                await hass.async_add_executor_job(client.close)
+
     if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id, None)
+        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+        domain_entries = hass.data.get(DOMAIN, {})
+        has_coordinators = any(
+            isinstance(v, GarminJrDataUpdateCoordinator) for v in domain_entries.values()
+        )
+        if not has_coordinators:
+            bridge = domain_entries.get("ai_bridge")
+            if bridge and hasattr(bridge, "close"):
+                with contextlib.suppress(Exception):
+                    await hass.async_add_executor_job(bridge.close)
 
     return unload_ok
 

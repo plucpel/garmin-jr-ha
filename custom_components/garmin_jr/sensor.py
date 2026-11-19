@@ -207,7 +207,9 @@ class GarminJrSensorEntity(
         if self.sensor_type == "safe_zone":
             return val or "Outside"
         if self.sensor_type == "school_mode":
-            in_school = get_child_school_mode_end_time(data) is not None
+            entry = getattr(self.coordinator, "entry", None)
+            entry_opts = entry.options if entry is not None and isinstance(getattr(entry, "options", None), dict) else None
+            in_school = get_child_school_mode_end_time(data, options=entry_opts) is not None
             sm = data.get("school_mode") or {}
             mode = str(sm.get("mode") or "Off")
             if mode.upper() == "OFF":
@@ -257,6 +259,8 @@ class GarminJrSensorEntity(
             attrs["has_wifi"] = data.get(ATTR_HAS_WIFI, False)
             attrs["fix_type"] = data.get(ATTR_FIX_TYPE)
         elif self.sensor_type == "school_mode":
+            entry = getattr(self.coordinator, "entry", None)
+            entry_opts = entry.options if entry is not None and isinstance(getattr(entry, "options", None), dict) else None
             sm = data.get("school_mode") or {}
             attrs["start_time"] = format_time_str(sm.get("startTime") or sm.get("start_time") or "08:00")
             attrs["end_time"] = format_time_str(sm.get("endTime") or sm.get("end_time") or "15:00")
@@ -264,7 +268,7 @@ class GarminJrSensorEntity(
             attrs["end_time_seconds"] = sm.get("endTime")
             attrs["days"] = sm.get("days") or ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
             attrs["mode"] = sm.get("mode") or "Restricted"
-            attrs["in_school_mode"] = get_child_school_mode_end_time(data) is not None
+            attrs["in_school_mode"] = get_child_school_mode_end_time(data, options=entry_opts) is not None
             attrs["operating_mode"] = get_child_operating_mode(data)
         return attrs
 

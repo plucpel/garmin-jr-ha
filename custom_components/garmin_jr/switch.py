@@ -9,6 +9,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
@@ -60,7 +61,7 @@ async def async_setup_entry(
 
 
 class GarminJrSchoolModeSwitch(
-    CoordinatorEntity[GarminJrDataUpdateCoordinator], SwitchEntity
+    CoordinatorEntity[GarminJrDataUpdateCoordinator], RestoreEntity, SwitchEntity
 ):
     """Representation of a Garmin Jr School Mode switch."""
 
@@ -78,6 +79,20 @@ class GarminJrSchoolModeSwitch(
         self._attr_unique_id = f"garmin_jr_{child_id}_school_mode_switch"
         self._attr_name = "School Mode"
         self._manual_override: bool | None = None
+
+    async def async_added_to_hass(self) -> None:
+        """Restore prior School Mode manual override across Home Assistant restarts."""
+        if hasattr(super(), "async_added_to_hass"):
+            await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state is None:
+            return
+        if last_state.state == "off":
+            self._manual_override = False
+            self.coordinator.set_child_school_mode_override(self.child_id, False)
+        elif last_state.state == "on" and last_state.attributes.get("manual_override") is True:
+            self._manual_override = True
+            self.coordinator.set_child_school_mode_override(self.child_id, True)
 
     @property
     def _child_data(self) -> dict[str, Any]:
@@ -142,7 +157,11 @@ class GarminJrSchoolModeSwitch(
         days = school_mode.get("days") or ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
         mode = "Off" if not self.is_on else (school_mode.get("mode") or "Restricted")
 
-        in_school = get_child_school_mode_end_time(child_data) is not None if self.is_on else False
+        in_school = False
+        if self.is_on:
+            entry = getattr(self.coordinator, "entry", None)
+            entry_opts = entry.options if entry is not None and isinstance(getattr(entry, "options", None), dict) else None
+            in_school = get_child_school_mode_end_time(child_data, options=entry_opts) is not None
         operating_mode = get_child_operating_mode(child_data) if self.is_on else "active"
 
         return {
@@ -155,6 +174,7 @@ class GarminJrSchoolModeSwitch(
             "in_school_mode": in_school,
             "operating_mode": operating_mode,
             "holiday_override": self._manual_override is False,
+            "manual_override": self._manual_override is not None,
         }
 
     @property

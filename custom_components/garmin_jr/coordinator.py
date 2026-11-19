@@ -2,10 +2,9 @@
 from __future__ import annotations
 
 from collections import deque
-from datetime import datetime, timedelta
-import json
+import contextlib
+from datetime import datetime, timedelta, timezone
 import logging
-import os
 import time
 from typing import Any
 
@@ -33,7 +32,12 @@ from .const import (
     EVENT_MESSAGE_RECEIVED,
     LOGGER,
 )
-from .garmin_client import GarminJrAuthError, GarminJrClient, GarminJrConnectionError
+from .garmin_client import (
+    GarminJrAuthError,
+    GarminJrClient,
+    GarminJrConnectionError,
+    extract_message_text,
+)
 from .plane_spotter import prefetch_airspace_sync
 
 FAST_MESSAGE_POLL_INTERVAL_SECONDS = 5
@@ -241,6 +245,7 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
         self.client = client
         self.entry = entry
         self._seen_message_ids: BoundedSet = BoundedSet(maxlen=1000)
+        self._verified_child_message_ids: BoundedSet = BoundedSet(maxlen=500)
         self._initial_fetch_done: bool = False
         self._messages_seeded: bool = False
         self._unsub_msg_poll: CALLBACK_TYPE | None = None
@@ -253,7 +258,10 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
         self._conversation_burst_until: float = 0.0
         self._burst_poll_unsub: CALLBACK_TYPE | None = None
         self._is_updating: bool = False
+        self._is_polling_messages: bool = False
         self._last_msg_fetch_ts: float = 0.0
+        self._last_full_update_ts: float = 0.0
+        self._background_tasks: set[Any] = set()
 
         # Load persisted learned child profile PKs from config entry options
         saved_pks = entry.options.get(CONF_CHILD_PROFILE_PKS, {})
@@ -274,6 +282,7 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
             hass,
             LOGGER,
             name=f"{DOMAIN}_{entry.entry_id}",
+            config_entry=entry,
             update_interval=timedelta(seconds=scan_interval_seconds),
         )
 
@@ -316,6 +325,19 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
         if self._burst_poll_unsub is not None:
             self._burst_poll_unsub()
             self._burst_poll_unsub = None
+        for task in list(self._background_tasks):
+            with contextlib.suppress(Exception):
+                task.cancel()
+        self._background_tasks.clear()
+
+    def _track_background_task(self, coro: Any) -> None:
+        """Schedule a coroutine on hass and keep a strong reference until completion."""
+        if not hasattr(self.hass, "async_create_task"):
+            return
+        task = self.hass.async_create_task(coro)
+        if task is not None and hasattr(task, "add_done_callback"):
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
     def _async_persist_learned_pks(self) -> None:
         """Persist newly learned child profile PKs to config entry options if changed."""
@@ -349,13 +371,15 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
         )
         device_id = child_data.get("device_id") or child_data.get("deviceId")
 
-        kid_identifiers = {
+        guardian_pks = getattr(self.client, "_guardian_profile_pks", set()) or set()
+        learned_pks = getattr(self.client, "_learned_child_pks", {}) or {}
+        kid_identifiers = ({
             str(child_id),
             str(connect_id or ""),
             str(device_id or ""),
             str(user_profile_pk or ""),
-            str(self.client._learned_child_pks.get(str(child_id)) or ""),
-        } - {"", "None", "null"}
+            str(learned_pks.get(str(child_id)) or ""),
+        } - {"", "None", "null"}) - guardian_pks
 
         child_name = child_data.get(ATTR_CHILD_NAME, "Child")
         has_updates = False
@@ -367,36 +391,47 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
             if not msg_id or msg_id in self._seen_message_ids:
                 continue
 
-            text_content = (
-                msg.get("messageText")
-                or msg.get("text")
-                or msg.get("transcription")
-                or msg.get("transcript")
-                or msg.get("audioTranscription")
-                or (msg.get("audioMetadata") or {}).get("transcript")
-                or (msg.get("audioDetails") or {}).get("transcription")
-            )
+            text_content = extract_message_text(msg, include_audio_placeholder=False)
 
             media_type = msg.get("mediaType", "")
             if not text_content and media_type in ("Audio", "audio/amr"):
-                msg_time_str = msg.get("createDateTime") or msg.get("createdTimestamp") or ""
+                msg_time_str = msg.get("createDateTime") or msg.get("createdTimestamp") or msg.get("timestamp") or ""
                 try:
-                    msg_dt = dt_util.parse_datetime(msg_time_str) if msg_time_str else None
-                    if msg_dt and (dt_util.now() - msg_dt).total_seconds() < 90:
-                        has_pending_transcription = True
-                        continue
+                    msg_dt = dt_util.parse_datetime(msg_time_str) if (msg_time_str and hasattr(dt_util, "parse_datetime")) else None
+                    if msg_dt is None and msg_time_str:
+                        msg_dt = datetime.fromisoformat(str(msg_time_str).replace("Z", "+00:00"))
+                    if msg_dt is not None:
+                        now_ref = dt_util.utcnow() if hasattr(dt_util, "utcnow") else datetime.now(timezone.utc)
+                        if msg_dt.tzinfo is None and now_ref.tzinfo is not None:
+                            msg_dt = msg_dt.replace(tzinfo=timezone.utc)
+                        elif msg_dt.tzinfo is not None and now_ref.tzinfo is None:
+                            now_ref = now_ref.replace(tzinfo=msg_dt.tzinfo)
+                        if (now_ref - msg_dt).total_seconds() < 300:
+                            has_pending_transcription = True
+                            continue
                 except Exception:
                     pass
 
-            if not text_content and media_type in ("Audio", "audio/amr"):
-                text_content = f"[{media_type}]"
+                # Timed out waiting for transcription (> 5 mins): mark seen and update state without firing automation event
+                self._seen_message_ids.add(msg_id)
+                has_updates = True
+                continue
 
             self._seen_message_ids.add(msg_id)
             has_updates = True
             from_pk = str(msg.get("fromUserProfilePk", ""))
-            is_from_child = from_pk in kid_identifiers
+            is_sent_echo = bool(
+                hasattr(self.client, "is_recently_sent_text")
+                and self.client.is_recently_sent_text(text_content)
+            )
+            is_from_child = (
+                from_pk in kid_identifiers
+                and from_pk not in guardian_pks
+                and not is_sent_echo
+            )
 
             if is_from_child and fire_events:
+                self._verified_child_message_ids.add(msg_id)
                 has_new_child_message = True
                 event_data = {
                     "child_id": child_id,
@@ -412,24 +447,15 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
                 }
                 self.hass.bus.async_fire(EVENT_MESSAGE_RECEIVED, event_data)
                 LOGGER.info(
-                    "Garmin Jr: Received incoming message from '%s': '%s' (fired %s)",
-                    child_name,
-                    text_content,
+                    "Garmin Jr: Received incoming message %s (%d chars) — fired %s",
+                    msg_id[-6:],
+                    len(str(text_content or "")),
                     EVENT_MESSAGE_RECEIVED,
                 )
 
         # Update last message attributes on child_data from newest message
         latest_msg = child_messages[0]
-        child_data["last_message"] = (
-            latest_msg.get("messageText")
-            or latest_msg.get("text")
-            or latest_msg.get("transcription")
-            or latest_msg.get("transcript")
-            or latest_msg.get("audioTranscription")
-            or (latest_msg.get("audioMetadata") or {}).get("transcript")
-            or (latest_msg.get("audioDetails") or {}).get("transcription")
-            or (f"[{latest_msg.get('mediaType', 'Audio')}]" if latest_msg.get("mediaType") in ("Audio", "audio/amr") else None)
-        )
+        child_data["last_message"] = extract_message_text(latest_msg, include_audio_placeholder=True)
         child_data["last_message_time"] = latest_msg.get("createDateTime") or latest_msg.get("createdTimestamp") or latest_msg.get("timestamp")
         from_pk = str(latest_msg.get("fromUserProfilePk", ""))
         is_latest_from_child = from_pk in kid_identifiers
@@ -496,7 +522,7 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
             self._was_in_school_mode = False
             self._school_mode_pause_until = 0.0
             LOGGER.info("Garmin Jr: School Mode inactive. Resuming active fast polling and requesting full refresh.")
-            self.hass.async_create_task(self.async_request_refresh())
+            self._track_background_task(self.async_request_refresh())
 
         # 2. Night Mode (Sleep Time): Relax polling to once per 5 minutes (300s) if user opted in
         if is_night_mode:
@@ -504,23 +530,28 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
                 return
             self._last_night_poll_ts = now_ts
             LOGGER.debug("Garmin Jr: Night mode active - polling at relaxed 300s (5m) interval")
-            self.hass.async_create_task(self.async_request_refresh())
+            self._track_background_task(self.async_request_refresh())
             return
 
-        # 3. Active: Poll messages (skip if full coordinator refresh is in flight or ran within 4s, or if GCS rate-limited)
-        if self._is_updating:
-            LOGGER.debug("Garmin Jr: Skipping fast message poll while full coordinator update is in progress")
+        # 3. Active: Poll messages (prevent overlap while allowing 2s rapid retries and 3s burst polls)
+        if self._is_updating or self._is_polling_messages:
+            LOGGER.debug("Garmin Jr: Skipping fast message poll while another poll/update is in progress")
             return
-        if (now_ts - self._last_msg_fetch_ts) < 4.0:
+        if (now_ts - self._last_full_update_ts) < 1.5:
             return
         if now_ts < getattr(self.client, "_gcs_rate_limited_until", 0.0):
             LOGGER.debug("Garmin Jr: Skipping fast message poll during GCS rate-limit cooldown")
             return
 
         self._last_msg_fetch_ts = now_ts
+        self._is_polling_messages = True
         try:
+            after_iso: str | None = None
+            if self._messages_seeded and hasattr(dt_util, "utcnow"):
+                after_iso = (dt_util.utcnow() - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
             recent_messages = await self.hass.async_add_executor_job(
-                self.client.fetch_messages, None, 100
+                self.client.fetch_messages, after_iso, 100
             )
             if not recent_messages:
                 if getattr(self.client, "last_messages_fetch_ok", True):
@@ -531,7 +562,7 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
             has_pending_transcription = False
             any_messages_matched = False
 
-            for child_id, child_data in self.data.items():
+            for child_id, child_data in list(self.data.items()):
                 connect_id = child_data.get("connect_id") or child_data.get("connectId") or (child_data.get("account") or {}).get("connectId")
                 user_profile_pk = resolve_child_profile_pk(
                     child_id,
@@ -599,15 +630,14 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
                 )
 
                 # Speculatively prefetch overhead airspace for child's location in background
-                for child_id, child_data in self.data.items():
-                    trackpoints = child_data.get("trackpoints") or []
-                    if trackpoints:
-                        latest_tp = trackpoints[-1]
-                        lat = latest_tp.get("latitude")
-                        lon = latest_tp.get("longitude")
-                        if lat and lon:
-                            LOGGER.debug("Garmin Jr: Speculatively prefetching airspace for (%.4f, %.4f)", lat, lon)
-                            self.hass.async_add_executor_job(prefetch_airspace_sync, lat, lon)
+                for child_id, child_data in list(self.data.items()):
+                    lat = child_data.get("latitude") or child_data.get("geofence_latitude")
+                    lon = child_data.get("longitude") or child_data.get("geofence_longitude")
+                    if lat is not None and lon is not None:
+                        LOGGER.debug("Garmin Jr: Speculatively prefetching airspace for child %s", child_id)
+                        self._track_background_task(
+                            self.hass.async_add_executor_job(prefetch_airspace_sync, float(lat), float(lon))
+                        )
             elif (
                 now_ts < self._conversation_burst_until
                 and not is_night_mode
@@ -624,12 +654,15 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
 
         except Exception as err:
             LOGGER.debug("Error during fast message poll: %s", err)
+        finally:
+            self._is_polling_messages = False
 
     async def _async_update_data(self) -> dict[str, dict[str, Any]]:
         """Fetch data from Garmin API in executor."""
         self._is_updating = True
         try:
-            data = await self.hass.async_add_executor_job(self.client.fetch_all_data)
+            local_today = dt_util.now().date().isoformat()
+            data = await self.hass.async_add_executor_job(self.client.fetch_all_data, local_today)
 
             # Apply any active manual overrides (e.g. for holiday/vacation)
             for cid, override in self._school_mode_overrides.items():
@@ -690,5 +723,7 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
             raise UpdateFailed(f"Unexpected error: {err}") from err
         finally:
             self._is_updating = False
-            self._last_msg_fetch_ts = time.time()
+            now_done = time.time()
+            self._last_msg_fetch_ts = now_done
+            self._last_full_update_ts = now_done
 

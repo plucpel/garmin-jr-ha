@@ -1,5 +1,4 @@
 """Constants for the Garmin Jr integration."""
-from datetime import timedelta
 import logging
 
 LOGGER = logging.getLogger(__package__)
@@ -7,40 +6,35 @@ LOGGER = logging.getLogger(__package__)
 DOMAIN = "garmin_jr"
 
 # Configuration options
-CONF_AUTH_TYPE = "auth_type"
-AUTH_TYPE_CREDENTIALS = "credentials"
-AUTH_TYPE_TOKEN = "token"
-
 CONF_EMAIL = "email"
 CONF_PASSWORD = "password"
-CONF_TOKEN_PATH = "token_path"
 CONF_TOKEN_DATA = "token_data"
 CONF_MFA_CODE = "mfa_code"
 CONF_TOKENS = "tokens"
 CONF_DI_TOKEN = "di_token"
 CONF_DI_REFRESH_TOKEN = "di_refresh_token"
 CONF_DI_CLIENT_ID = "di_client_id"
-CONF_IT_TOKEN = "it_token"
-CONF_IT_REFRESH_TOKEN = "it_refresh_token"
-CONF_IT_EXPIRES_AT = "it_expires_at"
 
 CONF_SCAN_INTERVAL = "scan_interval"
 CONF_ZONE_MAPPING = "zone_mapping"
 CONF_SCHOOL_MODE_ENABLED = "school_mode_enabled"
 CONF_SCHOOL_MODE_START_TIME = "school_mode_start_time"
 CONF_SCHOOL_MODE_END_TIME = "school_mode_end_time"
-CONF_SCHOOL_MODE_DAYS = "school_mode_days"
 CONF_NIGHT_MODE_ENABLED = "night_mode_enabled"
 CONF_CHILD_PROFILE_PKS = "child_profile_pks"
 CONF_LLM_URL = "llm_url"
 CONF_LLM_MODEL = "llm_model"
+CONF_GARAGE_COVER_ENTITY = "garage_cover_entity"
+CONF_HOME_SAFE_ZONE = "home_safe_zone"
+CONF_CLEAR_LEARNED_PKS = "clear_learned_pks"
 
 DEFAULT_SCAN_INTERVAL = 300  # 5 minutes
-MIN_SCAN_INTERVAL = 60  # 1 minute
 DEFAULT_SCHOOL_MODE_START_TIME = "08:00"
 DEFAULT_SCHOOL_MODE_END_TIME = "15:00"
 DEFAULT_LLM_URL = "http://127.0.0.1:13305"
 DEFAULT_LLM_MODEL = "gemma4-it-e2b-FLM"
+DEFAULT_GARAGE_COVER_ENTITY = "cover.garage_door"
+DEFAULT_HOME_SAFE_ZONE = "Papa"
 
 PLATFORMS = ["device_tracker", "sensor", "switch"]
 
@@ -50,14 +44,13 @@ EVENT_MESSAGE_RECEIVED = "garmin_jr_message_received"
 # Services
 SERVICE_SEND_MESSAGE = "send_message"
 SERVICE_REQUEST_LOCATION_UPDATE = "request_location_update"
-SERVICE_SET_STEP_GOAL = "set_step_goal"
 SERVICE_SPOT_PLANE = "spot_plane"
 SERVICE_PROCESS_BOUNCE_MESSAGE = "process_bounce_message"
 
 ATTR_MESSAGE = "message"
+ATTR_MESSAGE_ID = "message_id"
 ATTR_TEXT = "text"
 ATTR_TARGET = "target"
-ATTR_GOAL = "goal"
 ATTR_SEND_TO_WATCH = "send_to_watch"
 ATTR_LANGUAGE = "language"
 
@@ -77,7 +70,6 @@ ATTR_LATITUDE = "latitude"
 ATTR_LONGITUDE = "longitude"
 ATTR_ACCURACY = "gps_accuracy"
 ATTR_LOCATION_TIMESTAMP = "location_timestamp"
-ATTR_GEOFENCE_STATUS = "geofence_status"
 ATTR_STEPS_RECORD = "steps_record"
 ATTR_ACTIVE_MINUTES_RECORD = "active_minutes_record"
 ATTR_FAMILY_ID = "family_id"
