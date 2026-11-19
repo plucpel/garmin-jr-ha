@@ -234,9 +234,8 @@ class GarminBounceAiBridge:
 
         return format_bounce_response(top_plane, loc_info, language="fr")
 
-    def _execute_open_garage(self, child_data: dict[str, Any]) -> str:
-        """Check safe zone presence and trigger garage door opening."""
-        # Safe zone check: Papa / Home / Maison / zone.home (case-insensitive)
+    def _is_child_near_home(self, child_data: dict[str, Any]) -> bool:
+        """Return True if child_data, device_tracker state, or GPS coordinates indicate the child is at/near home."""
         safe_zone = str(
             child_data.get("active_geofence_name")
             or child_data.get("garmin_safe_zone")
@@ -253,39 +252,190 @@ class GarminBounceAiBridge:
             f"device_tracker.{child_name}_{child_name}_location",
         ]
 
-        is_near_home = (
+        if (
             "papa" in safe_zone
             or "home" in safe_zone
             or "maison" in safe_zone
             or "home_zone" in safe_zone
+            or "cabanon" in safe_zone
             or (
                 hasattr(self.hass, "states")
                 and any(
                     (state := self.hass.states.get(entity_id)) is not None
-                    and str(state.state).lower() in ("home", "papa", "maison", "zone.home")
+                    and str(state.state).lower() in ("home", "papa", "maison", "zone.home", "cabanon")
                     for entity_id in tracker_entities
                 )
             )
-        )
+        ):
+            return True
 
-        # Proximity fallback: check GPS distance to Home Assistant home zone (< 500 meters)
-        if not is_near_home and hasattr(self.hass, "config") and self.hass.config:
-            kid_lat = child_data.get("latitude")
-            kid_lon = child_data.get("longitude")
-            home_lat = getattr(self.hass.config, "latitude", None)
-            home_lon = getattr(self.hass.config, "longitude", None)
-            if kid_lat is not None and kid_lon is not None and home_lat is not None and home_lon is not None:
-                try:
-                    dist_m, _, _ = haversine_bearing_elevation(
-                        float(home_lat), float(home_lon), float(kid_lat), float(kid_lon), 0.0
-                    )
-                    if dist_m <= 500.0:
-                        is_near_home = True
-                        _LOGGER.debug("Garmin Jr: Child GPS is within %.1fm of home (near home)", dist_m)
-                except Exception as dist_err:
-                    _LOGGER.debug("Error computing distance to home: %s", dist_err)
+        kid_lat = child_data.get("latitude")
+        kid_lon = child_data.get("longitude")
+        if kid_lat is not None and kid_lon is not None:
+            # 1. Check GPS distance to Home Assistant home zone (< 500 meters)
+            if hasattr(self.hass, "config") and self.hass.config:
+                home_lat = getattr(self.hass.config, "latitude", None)
+                home_lon = getattr(self.hass.config, "longitude", None)
+                if home_lat is not None and home_lon is not None:
+                    try:
+                        dist_m, _, _ = haversine_bearing_elevation(
+                            float(home_lat), float(home_lon), float(kid_lat), float(kid_lon), 0.0
+                        )
+                        if dist_m <= 500.0:
+                            _LOGGER.debug("Garmin Jr: Child GPS is within %.1fm of home (near home)", dist_m)
+                            return True
+                    except Exception as dist_err:
+                        _LOGGER.debug("Error computing distance to home: %s", dist_err)
+
+            # 2. Check GPS distance to any configured Papa/Home Garmin geofence (< 500 meters)
+            for gf in child_data.get("geofences") or []:
+                gf_name = str(gf.get("name") or "").lower()
+                if any(k in gf_name for k in ("papa", "home", "maison", "home_zone")):
+                    gf_lat = gf.get("latitude")
+                    gf_lon = gf.get("longitude")
+                    if gf_lat is not None and gf_lon is not None:
+                        try:
+                            dist_m, _, _ = haversine_bearing_elevation(
+                                float(gf_lat), float(gf_lon), float(kid_lat), float(kid_lon), 0.0
+                            )
+                            if dist_m <= 500.0:
+                                _LOGGER.debug("Garmin Jr: Child GPS is within %.1fm of %s geofence", dist_m, gf.get("name"))
+                                return True
+                        except Exception:
+                            continue
+
+        return False
+
+    def _find_garmin_client_and_coordinator(self, child_id: str) -> tuple[Any, Any]:
+        """Locate the active GarminJrClient and coordinator for a child."""
+        domain_data = getattr(self.hass, "data", {}).get(DOMAIN, {}) if hasattr(self.hass, "data") and isinstance(self.hass.data, dict) else {}
+        for item in domain_data.values():
+            client = getattr(item, "client", None)
+            if client is not None and hasattr(client, "fetch_trackpoints"):
+                coord_data = getattr(item, "data", None)
+                if not child_id or (isinstance(coord_data, dict) and str(child_id) in coord_data):
+                    return client, item
+        for item in domain_data.values():
+            client = getattr(item, "client", None)
+            if client is not None and hasattr(client, "fetch_trackpoints"):
+                return client, item
+        return None, None
+
+    def _refresh_child_location_live(self, child_data: dict[str, Any]) -> bool:
+        """Fetch latest trackpoints live from Garmin Cloud and update child_data in place."""
+        child_id = str(child_data.get("child_id") or child_data.get("id") or "")
+        connect_id = (
+            child_data.get("connectId")
+            or child_data.get("connect_id")
+            or (child_data.get("account") or {}).get("connectId")
+        )
+        client, coordinator = self._find_garmin_client_and_coordinator(child_id)
+        if client is None:
+            return False
+
+        try:
+            trackpoints = client.fetch_trackpoints(child_id or connect_id, limit=30, connect_id=connect_id)
+            if not trackpoints:
+                return False
+
+            trackpoints.sort(
+                key=lambda tp: str(tp.get("timestamp") or tp.get("dateTime") or tp.get("date") or "")
+            )
+            latest_pt = trackpoints[-1]
+            pos = latest_pt.get("position") or {}
+            raw_lat = pos.get("lat")
+            raw_lon = pos.get("lon")
+            if raw_lat is not None and raw_lon is not None:
+                latitude = raw_lat * (180.0 / 2147483648.0)
+                longitude = raw_lon * (180.0 / 2147483648.0)
+            else:
+                latitude = latest_pt.get("latitude") or pos.get("latitude")
+                longitude = latest_pt.get("longitude") or pos.get("longitude")
+
+            if latitude is not None and longitude is not None:
+                child_data["latitude"] = latitude
+                child_data["longitude"] = longitude
+            child_data["gps_accuracy"] = latest_pt.get("accuracy") or latest_pt.get("accuracyMeters") or child_data.get("gps_accuracy", 15)
+            child_data["location_timestamp"] = (
+                latest_pt.get("timestamp")
+                or latest_pt.get("dateTime")
+                or latest_pt.get("date")
+                or child_data.get("location_timestamp")
+            )
+            if latest_pt.get("fixType"):
+                child_data["fix_type"] = latest_pt.get("fixType")
+
+            geofences = child_data.get("geofences") or []
+            geofence_by_id = {str(g.get("id")): g for g in geofences if g.get("id") is not None}
+            active_geofence_name = None
+            active_geofence_id = None
+
+            for tp in reversed(trackpoints):
+                fp_data = tp.get("familyPointData") or {}
+                for sc in fp_data.get("statusChanges") or []:
+                    dev_state = str(sc.get("deviceState") or "").upper().replace("_", "")
+                    g_id = sc.get("geofenceId")
+                    if dev_state == "GEOFENCEENTER" and g_id is not None:
+                        active_geofence_id = str(g_id)
+                        gf = geofence_by_id.get(active_geofence_id)
+                        active_geofence_name = (gf.get("name") if gf else None) or f"Zone {active_geofence_id}"
+                        break
+                    elif dev_state == "GEOFENCEEXIT":
+                        active_geofence_name = "Outside"
+                        break
+                if active_geofence_name is not None:
+                    break
+
+            if active_geofence_name is not None:
+                child_data["garmin_safe_zone"] = active_geofence_name
+                child_data["active_geofence_name"] = active_geofence_name
+                child_data["garmin_geofence_id"] = active_geofence_id
+
+            last_results = getattr(client, "_last_results", None)
+            if isinstance(last_results, dict) and child_id in last_results:
+                for key in ("latitude", "longitude", "gps_accuracy", "location_timestamp", "fix_type", "garmin_safe_zone", "garmin_geofence_id"):
+                    if key in child_data:
+                        last_results[child_id][key] = child_data[key]
+
+            if (
+                coordinator is not None
+                and hasattr(coordinator, "async_update_listeners")
+                and hasattr(self.hass, "loop")
+                and self.hass.loop.is_running()
+            ):
+                self.hass.loop.call_soon_threadsafe(coordinator.async_update_listeners)
+
+            _LOGGER.info(
+                "Garmin Jr: Live location check for %s updated safe_zone=%s, coords=(%s, %s) at %s",
+                child_id,
+                child_data.get("garmin_safe_zone"),
+                child_data.get("latitude"),
+                child_data.get("longitude"),
+                child_data.get("location_timestamp"),
+            )
+            return True
+        except Exception as err:
+            _LOGGER.debug("Live location refresh during garage check failed: %s", err)
+            return False
+
+    def _execute_open_garage(self, child_data: dict[str, Any]) -> str:
+        """Check safe zone presence (with live cloud trackpoint fallback) and trigger garage door opening."""
+        is_near_home = self._is_child_near_home(child_data)
 
         if not is_near_home:
+            _LOGGER.debug("Garmin Jr: Cached state indicates child is not home; fetching live trackpoints before rejecting garage open")
+            if self._refresh_child_location_live(child_data):
+                is_near_home = self._is_child_near_home(child_data)
+
+        if not is_near_home:
+            child_id = str(child_data.get("child_id") or child_data.get("id") or "")
+            device_id = child_data.get("device_id") or child_data.get("deviceId") or child_id
+            client, _ = self._find_garmin_client_and_coordinator(child_id)
+            if client is not None and device_id and hasattr(client, "request_location_update"):
+                try:
+                    client.request_location_update(device_id)
+                except Exception:
+                    pass
             return "Tu n'es pas à la maison pour ouvrir le garage! 🏠"
 
         try:

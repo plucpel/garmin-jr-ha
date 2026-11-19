@@ -1323,8 +1323,46 @@ class TestGarminJrClient(unittest.TestCase):
                 )
             self.assertIn("J'ouvre la porte du garage", res_phrase)
             mock_hass.services.async_call.assert_called_once()
+        mock_hass.services.async_call.reset_mock()
 
-        print("  [OK] AI Bridge open garage safe zone verification, non-blocking dispatch, GPS proximity, and natural phrasing intent verified!")
+        # 6. Test on-demand live trackpoint refresh when cached child_data is still 612m away ('Outside')
+        mock_client = MagicMock()
+        mock_client.fetch_trackpoints.return_value = [
+            {
+                "latitude": 45.5017,
+                "longitude": -73.5673,
+                "accuracy": 10,
+                "timestamp": "2026-11-19T12:59:31.000Z",
+                "fixType": "GPS",
+                "familyPointData": {
+                    "statusChanges": [{"deviceState": "GeofenceEnter", "geofenceId": 500001}]
+                },
+            }
+        ]
+        mock_coord = MagicMock()
+        mock_coord.client = mock_client
+        mock_hass.data = {"garmin_jr": {"entry_1": mock_coord}}
+
+        child_stale_walk = {
+            "child_id": "10000001",
+            "child_name": "Leo",
+            "connectId": 20000001,
+            "garmin_safe_zone": "Outside",
+            "latitude": 45.4974,
+            "longitude": -73.5623,
+            "geofences": [{"id": 500001, "name": "Papa", "latitude": 45.5017, "longitude": -73.5673, "radius": 150}],
+        }
+        with patch(
+            "custom_components.garmin_jr.ai_bridge.asyncio.run_coroutine_threadsafe",
+            return_value=ok_future,
+        ):
+            res_live = bridge._execute_open_garage(child_stale_walk)
+        self.assertIn("J'ouvre la porte du garage", res_live)
+        self.assertEqual(child_stale_walk["garmin_safe_zone"], "Papa")
+        mock_client.fetch_trackpoints.assert_called_once_with("10000001", limit=30, connect_id=20000001)
+        mock_hass.services.async_call.assert_called_once()
+
+        print("  [OK] AI Bridge open garage safe zone verification, live trackpoint fallback, non-blocking dispatch, GPS proximity, and natural phrasing intent verified!")
 
     @patch("custom_components.garmin_jr.garmin_client.requests.post")
     @patch("custom_components.garmin_jr.garmin_client.requests.get")

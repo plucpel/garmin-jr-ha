@@ -584,7 +584,7 @@ class GarminJrDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, An
                     )
 
             if has_updates:
-                self.async_set_updated_data(dict(self.data))
+                self.async_update_listeners()
                 self._async_persist_learned_pks()
 
             # Rapid retry: if an untranscribed voice note is pending in Garmin cloud,
